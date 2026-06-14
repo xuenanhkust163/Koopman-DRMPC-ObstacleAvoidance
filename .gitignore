@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+_output/
+
+*.log
+
+docs/paper_alignment_steps.md
