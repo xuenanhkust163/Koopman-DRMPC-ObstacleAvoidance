@@ -36,10 +36,9 @@ class SerpentineTrack(BaseTrack):
     def _build_track(self):
         """Build the serpentine centerline from hand-crafted waypoints."""
 
-        # Raw waypoints (arbitrary scale); will be uniformly rescaled to
-        # self._target_length.  The path weaves back and forth with tight
-        # hairpins and S-curves packed into a compact area — giving a
-        # "弯弯曲曲" (winding/serpentine) layout.
+        # Raw waypoints (arbitrary scale); they will be uniformly rescaled to
+        # self._target_length. The path weaves back and forth with tight
+        # hairpins and compact S-curves to form a strongly serpentine layout.
         waypoints = np.array([
             # -- Start / Finish (bottom-left) --
             [   0,    0],
