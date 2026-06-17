@@ -61,6 +61,19 @@ NUM_LAPS = 1
 LAP_FRACTION = 1.0 * NUM_LAPS
 TRACK_NAME = "SerpentineTrack"
 
+TECH_STYLE = {
+    "fig_bg": "#06111f",
+    "ax_bg": "#081827",
+    "grid": "#23445d",
+    "text": "#d9eef7",
+    "muted": "#7893a6",
+    "center": "#7bdff2",
+    "boundary": "#b7c7d6",
+    "obstacle": "#ffcc66",
+    "robust": "#37a2ff",
+    "nonrobust": "#ff4d6d",
+}
+
 os.makedirs(RESULTS_DIR, exist_ok=True)
 os.makedirs(FIGURES_DIR, exist_ok=True)
 
@@ -242,7 +255,8 @@ def generate_dual_line_animation(result_robust, result_nonrobust, track, output_
     boundary_right_x = track_x - TRACK_HALF_WIDTH * normal_x
     boundary_right_y = track_y - TRACK_HALF_WIDTH * normal_y
     
-    fig, ax = plt.subplots(figsize=(12, 8))
+    fig, ax = plt.subplots(figsize=(12, 8), facecolor=TECH_STYLE["fig_bg"])
+    ax.set_facecolor(TECH_STYLE["ax_bg"])
 
     # Keep a global map view instead of zooming into the traversed prefix.
     all_track_x = np.concatenate([track_x, boundary_left_x, boundary_right_x])
@@ -251,10 +265,19 @@ def generate_dual_line_animation(result_robust, result_nonrobust, track, output_
     ax.set_xlim(np.min(all_track_x) - map_margin, np.max(all_track_x) + map_margin)
     ax.set_ylim(np.min(all_track_y) - map_margin, np.max(all_track_y) + map_margin)
     
-    # Draw the track and boundaries.
-    ax.plot(track_x, track_y, 'k--', linewidth=1, alpha=0.3, label='Centerline')
-    ax.plot(boundary_left_x, boundary_left_y, 'k-', linewidth=1, alpha=0.3)
-    ax.plot(boundary_right_x, boundary_right_y, 'k-', linewidth=1, alpha=0.3)
+    # Draw the track in the locked thin-line technical style.
+    ax.plot(
+        track_x,
+        track_y,
+        linestyle=(0, (5, 4)),
+        color=TECH_STYLE["center"],
+        linewidth=0.85,
+        alpha=0.65,
+        label='Centerline',
+        zorder=2,
+    )
+    ax.plot(boundary_left_x, boundary_left_y, color=TECH_STYLE["boundary"], linewidth=0.72, alpha=0.62, zorder=1)
+    ax.plot(boundary_right_x, boundary_right_y, color=TECH_STYLE["boundary"], linewidth=0.72, alpha=0.62, zorder=1)
 
     # Draw obstacles, preferring rectangles and falling back to circles.
     rect_obstacles = track.get_rect_obstacles()
@@ -276,10 +299,10 @@ def generate_dual_line_animation(result_robust, result_nonrobust, track, output_
             poly = patches.Polygon(
                 corners,
                 closed=True,
-                linewidth=1.0,
-                edgecolor='dimgray',
-                facecolor='lightgray',
-                alpha=0.45,
+                linewidth=0.9,
+                edgecolor=TECH_STYLE["obstacle"],
+                facecolor='none',
+                alpha=0.78,
                 zorder=1,
             )
             ax.add_patch(poly)
@@ -288,40 +311,62 @@ def generate_dual_line_animation(result_robust, result_nonrobust, track, output_
             circ = patches.Circle(
                 (ox, oy),
                 r,
-                linewidth=1.0,
-                edgecolor='dimgray',
-                facecolor='lightgray',
-                alpha=0.45,
+                linewidth=0.9,
+                edgecolor=TECH_STYLE["obstacle"],
+                facecolor='none',
+                alpha=0.78,
                 zorder=1,
             )
             ax.add_patch(circ)
     
     ax.set_aspect('equal')
-    ax.grid(True, alpha=0.2)
-    ax.legend(loc='upper right')
-    ax.set_xlabel('X [m]')
-    ax.set_ylabel('Y [m]')
-    ax.set_title(f'Robust (Blue) vs Non-Robust (Red) Comparison on {TRACK_NAME}')
+    ax.grid(True, color=TECH_STYLE["grid"], alpha=0.42, linewidth=0.48)
+    for spine in ax.spines.values():
+        spine.set_color(TECH_STYLE["grid"])
+        spine.set_linewidth(0.8)
+    ax.tick_params(colors=TECH_STYLE["muted"], labelsize=9)
+    ax.set_xlabel('X [m]', color=TECH_STYLE["text"])
+    ax.set_ylabel('Y [m]', color=TECH_STYLE["text"])
+    ax.set_title(
+        f'Robust vs Non-Robust Comparison on {TRACK_NAME}',
+        color=TECH_STYLE["text"],
+        fontsize=13,
+        pad=12,
+    )
     
     # Initialize trajectory artists.
-    line_r, = ax.plot([], [], 'b-', linewidth=2, alpha=0.7, label='Robust K-DRMPC')
-    line_nr, = ax.plot([], [], 'r-', linewidth=2, alpha=0.7, label='Non-Robust K-DRMPC')
-    point_r, = ax.plot([], [], 'bo', markersize=8)
-    point_nr, = ax.plot([], [], 'ro', markersize=8)
+    glow_r, = ax.plot([], [], color=TECH_STYLE["robust"], linewidth=3.6, alpha=0.15, zorder=4)
+    glow_nr, = ax.plot([], [], color=TECH_STYLE["nonrobust"], linewidth=3.6, alpha=0.14, zorder=4)
+    line_r, = ax.plot([], [], color=TECH_STYLE["robust"], linewidth=1.45, alpha=0.95, label='Robust K-DRMPC', zorder=5)
+    line_nr, = ax.plot([], [], color=TECH_STYLE["nonrobust"], linewidth=1.45, alpha=0.95, label='Non-Robust K-DRMPC', zorder=5)
+    point_r, = ax.plot([], [], 'o', color=TECH_STYLE["robust"], markersize=5.2, markeredgecolor='white', markeredgewidth=0.35, zorder=6)
+    point_nr, = ax.plot([], [], 'o', color=TECH_STYLE["nonrobust"], markersize=5.2, markeredgecolor='white', markeredgewidth=0.35, zorder=6)
     
     text_info = ax.text(0.02, 0.98, '', transform=ax.transAxes, 
                         verticalalignment='top', fontfamily='monospace',
-                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+                        fontsize=9, color=TECH_STYLE["text"],
+                        bbox=dict(
+                            boxstyle='round,pad=0.35',
+                            facecolor='#0d2236',
+                            edgecolor=TECH_STYLE["center"],
+                            linewidth=0.75,
+                            alpha=0.88,
+                        ))
     
-    ax.legend(loc='upper right')
+    legend = ax.legend(loc='upper right', frameon=True, fontsize=9)
+    legend.get_frame().set_facecolor('#0d2236')
+    legend.get_frame().set_edgecolor(TECH_STYLE["grid"])
+    legend.get_frame().set_alpha(0.86)
+    for text in legend.get_texts():
+        text.set_color(TECH_STYLE["text"])
 
     n_r = len(states_r)
     n_nr = len(states_nr)
     n_frames = max(n_r, n_nr)
 
     # Create end markers and hide them initially.
-    crash_r, = ax.plot([], [], 'bx', markersize=12, markeredgewidth=2)
-    crash_nr, = ax.plot([], [], 'rx', markersize=12, markeredgewidth=2)
+    crash_r, = ax.plot([], [], 'x', color=TECH_STYLE["robust"], markersize=9, markeredgewidth=1.8, zorder=7)
+    crash_nr, = ax.plot([], [], 'x', color=TECH_STYLE["nonrobust"], markersize=9, markeredgewidth=1.8, zorder=7)
 
     # Terminal steps in original simulation coordinates.
     term_step_r = orig_len_r if orig_len_r < original_len else None
@@ -330,11 +375,13 @@ def generate_dual_line_animation(result_robust, result_nonrobust, track, output_
     def init():
         line_r.set_data([], [])
         line_nr.set_data([], [])
+        glow_r.set_data([], [])
+        glow_nr.set_data([], [])
         point_r.set_data([], [])
         point_nr.set_data([], [])
         crash_r.set_data([], [])
         crash_nr.set_data([], [])
-        return line_r, line_nr, point_r, point_nr, crash_r, crash_nr, text_info
+        return glow_r, glow_nr, line_r, line_nr, point_r, point_nr, crash_r, crash_nr, text_info
 
     def animate(frame):
         # Convert animation frame indices back to original simulation steps.
@@ -343,6 +390,8 @@ def generate_dual_line_animation(result_robust, result_nonrobust, track, output_
         # Draw trajectory prefixes.
         line_r.set_data(states_r[:min(frame+1, n_r), 0], states_r[:min(frame+1, n_r), 1])
         line_nr.set_data(states_nr[:min(frame+1, n_nr), 0], states_nr[:min(frame+1, n_nr), 1])
+        glow_r.set_data(states_r[:min(frame+1, n_r), 0], states_r[:min(frame+1, n_r), 1])
+        glow_nr.set_data(states_nr[:min(frame+1, n_nr), 0], states_nr[:min(frame+1, n_nr), 1])
 
         # Robust current position or terminal marker.
         if term_step_r is not None and current_original >= term_step_r:
@@ -378,7 +427,7 @@ def generate_dual_line_animation(result_robust, result_nonrobust, track, output_
             info_text += f"NonRobust (R): x={states_nr[f_nr, 0]:.1f}, y={states_nr[f_nr, 1]:.1f}"
         text_info.set_text(info_text)
 
-        return line_r, line_nr, point_r, point_nr, crash_r, crash_nr, text_info
+        return glow_r, glow_nr, line_r, line_nr, point_r, point_nr, crash_r, crash_nr, text_info
 
     anim = FuncAnimation(fig, animate, init_func=init,
                         frames=n_frames, interval=1000/fps,
