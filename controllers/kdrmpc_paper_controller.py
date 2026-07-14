@@ -16,6 +16,7 @@ import time
 import casadi as ca
 import numpy as np
 
+from config import A_LAT_MAX, REF_SPEED_SCALE
 from controllers import kdrmpc_controller as base
 
 
@@ -172,6 +173,276 @@ class KDRMPCPaperController(base.KDRMPCController):
             return False
         return forward_gap <= self.robust_obstacle_speed_preview
 
+    def _tracking_error_metrics(self, x_current, ref_trajectory):
+        ref0 = np.asarray(ref_trajectory[min(0, len(ref_trajectory) - 1)], dtype=float)
+        dx = float(x_current[0] - ref0[0])
+        dy = float(x_current[1] - ref0[1])
+        psi_ref = float(ref0[base.IDX_PSI])
+        e_lat = -np.sin(psi_ref) * dx + np.cos(psi_ref) * dy
+        e_psi = np.arctan2(
+            np.sin(float(x_current[base.IDX_PSI]) - psi_ref),
+            np.cos(float(x_current[base.IDX_PSI]) - psi_ref),
+        )
+        return {
+            'abs_e_lat': abs(float(e_lat)),
+            'abs_e_psi': abs(float(e_psi)),
+            'v_ref': float(ref0[base.IDX_V]),
+            'v_cur': float(x_current[base.IDX_V]),
+        }
+
+    @staticmethod
+    def _wrap_angle(angle):
+        return float(np.arctan2(np.sin(angle), np.cos(angle)))
+
+    def _reference_preview_metrics(self, ref_trajectory):
+        if len(ref_trajectory) == 0:
+            return {
+                'preview_heading_change_deg': 0.0,
+                'preview_heading_rate_deg': 0.0,
+                'preview_curvature_max': 0.0,
+                'preview_curvature_mean': 0.0,
+                'preview_steps': 0,
+            }
+
+        preview_steps = min(len(ref_trajectory), 10)
+        psi0 = float(ref_trajectory[0, base.IDX_PSI])
+        heading_offsets = [
+            abs(np.rad2deg(self._wrap_angle(float(ref_trajectory[t, base.IDX_PSI]) - psi0)))
+            for t in range(preview_steps)
+        ]
+        curvature_samples = []
+        for t in range(preview_steps):
+            v_ref_t = abs(float(ref_trajectory[t, base.IDX_V]))
+            omega_ref_t = abs(float(ref_trajectory[t, base.IDX_OMEGA]))
+            if v_ref_t > 1e-4:
+                curvature_samples.append(omega_ref_t / v_ref_t)
+            else:
+                curvature_samples.append(0.0)
+        max_heading_change_deg = float(max(heading_offsets)) if heading_offsets else 0.0
+        heading_rate_deg = max_heading_change_deg / max(float(preview_steps - 1), 1.0)
+        preview_curvature_max = float(max(curvature_samples)) if curvature_samples else 0.0
+        preview_curvature_mean = float(np.mean(curvature_samples)) if curvature_samples else 0.0
+        return {
+            'preview_heading_change_deg': max_heading_change_deg,
+            'preview_heading_rate_deg': float(heading_rate_deg),
+            'preview_curvature_max': preview_curvature_max,
+            'preview_curvature_mean': preview_curvature_mean,
+            'preview_steps': int(preview_steps),
+        }
+
+    def _track_lookahead_metrics(self, x_current, lookahead_distance=25.0):
+        if self.track is None:
+            return {
+                'track_lookahead_curvature_max': 0.0,
+                'track_lookahead_curvature_p90': 0.0,
+                'track_lookahead_curvature_mean': 0.0,
+                'track_lookahead_safe_speed': float(REF_SPEED_SCALE * base.V_MAX),
+                'track_lookahead_distance': 0.0,
+            }
+
+        try:
+            _, current_s, _ = self.track.closest_point(float(x_current[0]), float(x_current[1]))
+            arc = self.track.get_arc_length()
+            curvature = np.abs(self.track.get_curvature())
+            total_length = float(self.track.total_length())
+        except Exception:
+            return {
+                'track_lookahead_curvature_max': 0.0,
+                'track_lookahead_curvature_p90': 0.0,
+                'track_lookahead_curvature_mean': 0.0,
+                'track_lookahead_safe_speed': float(REF_SPEED_SCALE * base.V_MAX),
+                'track_lookahead_distance': 0.0,
+            }
+
+        current_s = float(current_s)
+        lookahead_distance = float(min(max(lookahead_distance, 0.0), total_length))
+        end_s = current_s + lookahead_distance
+
+        if end_s <= total_length:
+            mask = (arc >= current_s) & (arc <= end_s)
+        else:
+            wrapped_end = end_s - total_length
+            mask = (arc >= current_s) | (arc <= wrapped_end)
+
+        segment_curvature = curvature[mask]
+        if len(segment_curvature) == 0:
+            idx = int(np.argmin(np.abs(arc - current_s)))
+            segment_curvature = curvature[idx:idx + 1]
+
+        max_curvature = float(np.max(segment_curvature))
+        if max_curvature > 1e-6:
+            lookahead_safe_speed = float(
+                REF_SPEED_SCALE * min(base.V_MAX, np.sqrt(A_LAT_MAX / max_curvature))
+            )
+        else:
+            lookahead_safe_speed = float(REF_SPEED_SCALE * base.V_MAX)
+
+        return {
+            'track_lookahead_curvature_max': max_curvature,
+            'track_lookahead_curvature_p90': float(np.percentile(segment_curvature, 90)),
+            'track_lookahead_curvature_mean': float(np.mean(segment_curvature)),
+            'track_lookahead_safe_speed': lookahead_safe_speed,
+            'track_lookahead_distance': lookahead_distance,
+        }
+
+    def _nearest_forward_obstacle_gap(self, x_current, nearby_obstacles):
+        if not nearby_obstacles:
+            return None
+
+        px = float(x_current[0])
+        py = float(x_current[1])
+
+        if self.track is not None:
+            try:
+                _, ego_s, _ = self.track.closest_point(px, py)
+                total_length = float(self.track.total_length())
+                forward_gaps = []
+                for ox, oy, _ in nearby_obstacles:
+                    _, obs_s, _ = self.track.closest_point(float(ox), float(oy))
+                    gap = (float(obs_s) - float(ego_s)) % total_length
+                    if gap <= 0.5 * total_length:
+                        forward_gaps.append(gap)
+                if forward_gaps:
+                    return float(min(forward_gaps))
+            except Exception:
+                pass
+
+        euclidean_gaps = [
+            float(np.hypot(px - float(ox), py - float(oy)))
+            for ox, oy, _ in nearby_obstacles
+        ]
+        return float(min(euclidean_gaps)) if euclidean_gaps else None
+
+    def _online_strategy_summary(self, x_current, ref_trajectory, nearby_obstacles):
+        metrics = self._tracking_error_metrics(x_current, ref_trajectory)
+        preview_metrics = self._reference_preview_metrics(ref_trajectory)
+        lookahead_metrics = self._track_lookahead_metrics(x_current)
+        forward_gap = self._nearest_forward_obstacle_gap(x_current, nearby_obstacles)
+
+        lat_risk = np.clip((metrics['abs_e_lat'] - 0.4) / 1.8, 0.0, 1.0)
+        psi_risk = np.clip(
+            (metrics['abs_e_psi'] - np.deg2rad(4.0)) / np.deg2rad(14.0),
+            0.0,
+            1.0,
+        )
+        obstacle_risk = 0.0
+        if forward_gap is not None:
+            obstacle_risk = float(np.clip((12.0 - forward_gap) / 12.0, 0.0, 1.0))
+
+        heading_curve_risk = float(np.clip(
+            (preview_metrics['preview_heading_change_deg'] - 6.0) / 16.0,
+            0.0,
+            1.0,
+        ))
+        curvature_curve_risk = float(np.clip(
+            (preview_metrics['preview_curvature_max'] - 0.0105) / 0.0055,
+            0.0,
+            1.0,
+        ))
+        lookahead_speed_excess = max(
+            0.0,
+            metrics['v_cur'] - (lookahead_metrics['track_lookahead_safe_speed'] + 0.15),
+        )
+        lookahead_curve_risk = float(np.clip(
+            lookahead_speed_excess / 1.2,
+            0.0,
+            1.0,
+        ))
+        immediate_curve_risk = max(heading_curve_risk, curvature_curve_risk)
+        curve_risk = max(immediate_curve_risk, 0.75 * lookahead_curve_risk)
+
+        alignment_risk = float(np.clip(
+            0.70 * curve_risk + 0.25 * lat_risk + 0.20 * psi_risk,
+            0.0,
+            1.2,
+        ))
+
+        combined_risk = float(np.clip(
+            0.40 * lat_risk + 0.20 * psi_risk + 0.55 * obstacle_risk + 0.55 * curve_risk,
+            0.0,
+            1.5,
+        ))
+
+        min_floor_scale = 1.0 - 0.55 * combined_risk
+        min_speed_floor = max(
+            base.MIN_SPEED_FLOOR,
+            self.robust_min_speed_floor * max(0.35, min_floor_scale),
+        )
+        effective_preview = max(
+            self.robust_obstacle_speed_preview,
+            4.0 + 6.0 * obstacle_risk + 2.0 * lat_risk,
+        )
+
+        curve_speed_scale = max(
+            0.58,
+            1.0 - 0.34 * immediate_curve_risk - 0.18 * lookahead_curve_risk - 0.12 * lat_risk - 0.08 * psi_risk,
+        )
+        curve_speed_cap = max(
+            min_speed_floor,
+            metrics['v_ref'] * curve_speed_scale + 0.20,
+        )
+        curve_speed_cap = min(
+            curve_speed_cap,
+            lookahead_metrics['track_lookahead_safe_speed'] + 0.15,
+        )
+        curve_accel_penalty = (
+            10.0 * max(0.0, lookahead_curve_risk - 0.25)
+            + 18.0 * max(0.0, immediate_curve_risk - 0.10)
+        ) * (1.0 + 0.5 * lat_risk)
+        curve_control_steps = min(
+            len(ref_trajectory),
+            max(3, int(preview_metrics['preview_steps']))
+        )
+        curve_speed_buffer = max(0.10, 0.28 - 0.10 * immediate_curve_risk - 0.08 * lookahead_curve_risk)
+        curve_hard_speed_cap = max(min_speed_floor, curve_speed_cap + curve_speed_buffer)
+
+        curve_accel_cap = float(base.A_MAX)
+        if lookahead_curve_risk > 0.25:
+            curve_accel_cap = min(curve_accel_cap, 0.15)
+        if immediate_curve_risk > 0.18:
+            curve_accel_cap = min(curve_accel_cap, 0.20 - 0.60 * min(1.0, immediate_curve_risk))
+        if immediate_curve_risk > 0.60 or alignment_risk > 0.75:
+            severe_curve_risk = max(immediate_curve_risk, alignment_risk)
+            curve_accel_cap = min(curve_accel_cap, -0.10 - 0.45 * min(1.0, severe_curve_risk))
+
+        return {
+            'lat_risk': float(lat_risk),
+            'psi_risk': float(psi_risk),
+            'obstacle_risk': float(obstacle_risk),
+            'immediate_curve_risk': float(immediate_curve_risk),
+            'lookahead_curve_risk': float(lookahead_curve_risk),
+            'curve_risk': curve_risk,
+            'alignment_risk': alignment_risk,
+            'combined_risk': combined_risk,
+            'forward_gap': forward_gap,
+            'min_speed_floor': float(min_speed_floor),
+            'obstacle_speed_weight': float(
+                self.robust_obstacle_speed_weight * (1.0 + 1.25 * combined_risk)
+            ),
+            'obstacle_accel_weight': float(
+                self.robust_obstacle_accel_weight * (1.0 + 1.00 * combined_risk)
+            ),
+            'obstacle_speed_preview': float(effective_preview),
+            'curve_speed_cap': float(curve_speed_cap),
+            'curve_hard_speed_cap': float(curve_hard_speed_cap),
+            'curve_accel_penalty': float(curve_accel_penalty),
+            'curve_accel_cap': float(curve_accel_cap),
+            'curve_control_steps': int(curve_control_steps),
+            'preview_heading_change_deg': float(preview_metrics['preview_heading_change_deg']),
+            'preview_heading_rate_deg': float(preview_metrics['preview_heading_rate_deg']),
+            'preview_curvature_max': float(preview_metrics['preview_curvature_max']),
+            'preview_curvature_mean': float(preview_metrics['preview_curvature_mean']),
+            'track_lookahead_curvature_max': float(lookahead_metrics['track_lookahead_curvature_max']),
+            'track_lookahead_curvature_p90': float(lookahead_metrics['track_lookahead_curvature_p90']),
+            'track_lookahead_curvature_mean': float(lookahead_metrics['track_lookahead_curvature_mean']),
+            'track_lookahead_safe_speed': float(lookahead_metrics['track_lookahead_safe_speed']),
+            'track_lookahead_distance': float(lookahead_metrics['track_lookahead_distance']),
+            'lookahead_speed_excess': float(lookahead_speed_excess),
+            'curve_preview_steps': int(preview_metrics['preview_steps']),
+            'abs_e_lat': float(metrics['abs_e_lat']),
+            'abs_e_psi': float(metrics['abs_e_psi']),
+        }
+
     def _track_uncertainty_tightening(self, w_phys_samples, T):
         """Return per-step track-boundary tightening for robust mode.
 
@@ -237,6 +508,17 @@ class KDRMPCPaperController(base.KDRMPCController):
         n_obs = len(nearby_obstacles)
         check_steps = list(range(1, T + 1))
         n_check = len(check_steps)
+        online_strategy = self._online_strategy_summary(x_current, ref_trajectory, nearby_obstacles)
+
+        if online_strategy['curve_risk'] > 0.0:
+            preview_steps = max(1, min(T, int(online_strategy['curve_preview_steps'])))
+            for t in range(preview_steps):
+                taper = 1.0 - 0.55 * float(t) / float(preview_steps)
+                guided_speed_cap = max(
+                    online_strategy['min_speed_floor'],
+                    online_strategy['curve_speed_cap'] + 0.25 * taper,
+                )
+                y_ref[t, 0] = min(y_ref[t, 0], guided_speed_cap)
 
         opti = ca.Opti()
         U = opti.variable(base.N_U, T)
@@ -296,7 +578,7 @@ class KDRMPCPaperController(base.KDRMPCController):
 
         min_speed_floor = base.MIN_SPEED_FLOOR
         if self.obstacle_strategy == "robust":
-            min_speed_floor = max(min_speed_floor, self.robust_min_speed_floor)
+            min_speed_floor = max(min_speed_floor, online_strategy['min_speed_floor'])
         min_speed_rule = base.MinSpeedRule(
             floor_abs=min_speed_floor,
             floor_ratio=base.MIN_SPEED_REF_RATIO,
@@ -307,6 +589,7 @@ class KDRMPCPaperController(base.KDRMPCController):
         dr_empirical_cost = 0
         robust_obstacle_speed_cost = 0
         robust_obstacle_accel_cost = 0
+        curve_positive_accel_cost = 0
 
         active_obstacle_steps = set()
         if (
@@ -314,18 +597,50 @@ class KDRMPCPaperController(base.KDRMPCController):
             self.robust_obstacle_speed_weight > 0.0 and
             n_obs > 0
         ):
+            adaptive_preview = online_strategy['obstacle_speed_preview']
             for tc in check_steps:
                 if any(
-                    self._obstacle_speed_cost_active_at_step(ref_trajectory, tc, obs)
+                    self._obstacle_active_at_step(ref_trajectory, tc, obs)
+                    or self._obstacle_speed_cost_active_at_step(ref_trajectory, tc, obs)
                     for obs in nearby_obstacles
                 ):
-                    active_obstacle_steps.add(tc)
+                    if adaptive_preview <= self.robust_obstacle_speed_preview:
+                        active_obstacle_steps.add(tc)
+                        continue
+
+                    ref_idx = min(max(tc - 1, 0), len(ref_trajectory) - 1)
+                    ref_x = float(ref_trajectory[ref_idx, 0])
+                    ref_y = float(ref_trajectory[ref_idx, 1])
+                    if self.track is not None:
+                        try:
+                            _, ref_s, _ = self.track.closest_point(ref_x, ref_y)
+                            total_length = float(self.track.total_length())
+                            close_ahead = False
+                            for ox, oy, _ in nearby_obstacles:
+                                _, obs_s, _ = self.track.closest_point(float(ox), float(oy))
+                                forward_gap = (float(obs_s) - float(ref_s)) % total_length
+                                if forward_gap <= 0.5 * total_length and forward_gap <= adaptive_preview:
+                                    close_ahead = True
+                                    break
+                            if close_ahead:
+                                active_obstacle_steps.add(tc)
+                                continue
+                        except Exception:
+                            pass
+
+                    if any(
+                        np.hypot(ref_x - float(ox), ref_y - float(oy)) <= adaptive_preview
+                        for ox, oy, _ in nearby_obstacles
+                    ):
+                        active_obstacle_steps.add(tc)
 
         for t in range(T):
             y_t = ca.vertcat(
                 ca.mtimes(self._E_ca, Z[t]),
                 ca.mtimes(self._F_ca, Z[t]),
             )
+            if t < max(1, int(online_strategy['curve_preview_steps'])):
+                curve_positive_accel_cost += ca.fmax(U[0, t], 0.0) ** 2
             y_ref_t = ca.DM(y_ref[t])
             cost += self.cost_builder.stage_cost(
                 opti=opti,
@@ -403,13 +718,19 @@ class KDRMPCPaperController(base.KDRMPCController):
             robust_obstacle_accel_cost += ca.fmax(U[0, tc - 1], 0.0) ** 2
 
         if active_obstacle_steps:
-            cost += self.robust_obstacle_speed_weight * robust_obstacle_speed_cost
+            cost += online_strategy['obstacle_speed_weight'] * robust_obstacle_speed_cost
             diag_terms['cost_robust_obstacle_speed'] = (
-                self.robust_obstacle_speed_weight * robust_obstacle_speed_cost
+                online_strategy['obstacle_speed_weight'] * robust_obstacle_speed_cost
             )
-            cost += self.robust_obstacle_accel_weight * robust_obstacle_accel_cost
+            cost += online_strategy['obstacle_accel_weight'] * robust_obstacle_accel_cost
             diag_terms['cost_robust_obstacle_accel'] = (
-                self.robust_obstacle_accel_weight * robust_obstacle_accel_cost
+                online_strategy['obstacle_accel_weight'] * robust_obstacle_accel_cost
+            )
+
+        if online_strategy['curve_accel_penalty'] > 0.0:
+            cost += online_strategy['curve_accel_penalty'] * curve_positive_accel_cost
+            diag_terms['cost_curve_positive_accel'] = (
+                online_strategy['curve_accel_penalty'] * curve_positive_accel_cost
             )
 
         cost += self.cost_builder.finalize_cost(
@@ -434,6 +755,14 @@ class KDRMPCPaperController(base.KDRMPCController):
         for t in range(T):
             opti.subject_to(opti.bounded(base.A_MIN, U[0, t], base.A_MAX))
             opti.subject_to(opti.bounded(-base.DELTA_MAX, U[1, t], base.DELTA_MAX))
+
+            if (
+                online_strategy['curve_risk'] > 0.20 and
+                t < int(online_strategy['curve_control_steps'])
+            ):
+                opti.subject_to(U[0, t] <= float(online_strategy['curve_accel_cap']))
+                opti.subject_to(Z[t + 1][base.IDX_V] <= float(online_strategy['curve_hard_speed_cap']))
+
             if t == 0:
                 opti.subject_to(opti.bounded(
                     -base.DELTA_RATE_MAX * base.DT,
@@ -565,9 +894,14 @@ class KDRMPCPaperController(base.KDRMPCController):
                 obs_slack=obs_slack,
             )
             debug_info.setdefault('horizon', {})['active_obstacle_speed_steps'] = len(active_obstacle_steps)
-            debug_info['horizon']['robust_obstacle_speed_weight'] = self.robust_obstacle_speed_weight
-            debug_info['horizon']['robust_obstacle_speed_preview'] = self.robust_obstacle_speed_preview
-            debug_info['horizon']['robust_obstacle_accel_weight'] = self.robust_obstacle_accel_weight
+            debug_info['horizon']['robust_obstacle_speed_weight'] = online_strategy['obstacle_speed_weight']
+            debug_info['horizon']['robust_obstacle_speed_preview'] = online_strategy['obstacle_speed_preview']
+            debug_info['horizon']['robust_obstacle_accel_weight'] = online_strategy['obstacle_accel_weight']
+            debug_info['horizon']['curve_speed_cap'] = online_strategy['curve_speed_cap']
+            debug_info['horizon']['curve_hard_speed_cap'] = online_strategy['curve_hard_speed_cap']
+            debug_info['horizon']['curve_accel_cap'] = online_strategy['curve_accel_cap']
+            debug_info['horizon']['curve_control_steps'] = online_strategy['curve_control_steps']
+            debug_info['horizon']['online_strategy'] = online_strategy
             self._warm_start = {'U': sol.value(U)}
         except Exception as exc:
             try:
@@ -614,12 +948,17 @@ class KDRMPCPaperController(base.KDRMPCController):
             'robust_track_tightening_scale': self.robust_track_tightening_scale,
             'robust_track_tightening_max': self.robust_track_tightening_max,
             'robust_track_slack_penalty_scale': self.robust_track_slack_penalty_scale,
-            'robust_min_speed_floor': self.robust_min_speed_floor,
-            'robust_obstacle_speed_weight': self.robust_obstacle_speed_weight,
-            'robust_obstacle_speed_preview': self.robust_obstacle_speed_preview,
-            'robust_obstacle_accel_weight': self.robust_obstacle_accel_weight,
+            'robust_min_speed_floor': online_strategy['min_speed_floor'],
+            'robust_obstacle_speed_weight': online_strategy['obstacle_speed_weight'],
+            'robust_obstacle_speed_preview': online_strategy['obstacle_speed_preview'],
+            'robust_obstacle_accel_weight': online_strategy['obstacle_accel_weight'],
+            'curve_speed_cap': online_strategy['curve_speed_cap'],
+            'curve_hard_speed_cap': online_strategy['curve_hard_speed_cap'],
+            'curve_accel_cap': online_strategy['curve_accel_cap'],
+            'curve_control_steps': online_strategy['curve_control_steps'],
             'safe_suboptimal_fallback': self.safe_suboptimal_fallback,
             'active_obstacle_speed_steps': len(active_obstacle_steps),
             'track_tightening_max': float(np.max(track_tightening)) if len(track_tightening) else 0.0,
+            'online_strategy': online_strategy,
             'debug': debug_info,
         }

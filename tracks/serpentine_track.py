@@ -27,10 +27,12 @@ from config import OBSTACLE_RADIUS, TRACK_HALF_WIDTH, OBSTACLE_LAYOUT_MODE, OBST
 class SerpentineTrack(BaseTrack):
     """Highly winding serpentine circuit (~1.4 km) with dense switchbacks."""
 
-    def __init__(self, num_points=1400, target_length=1400.0):
+    def __init__(self, num_points=1400, target_length=1400.0, swap_xy=False):
         super().__init__()
         self._target_points = num_points
         self._target_length = target_length
+        self._swap_xy = bool(swap_xy)
+        self._display_name = "Serpentine Horizontal Track" if self._swap_xy else "Serpentine Track"
         self._build_track()
 
     def _build_track(self):
@@ -87,6 +89,9 @@ class SerpentineTrack(BaseTrack):
             [   0,    0],
         ], dtype=np.float64)
 
+        if self._swap_xy:
+            waypoints = waypoints[:, [1, 0]]
+
         # --- Scale to target length ---
         raw_length = sum(
             np.linalg.norm(waypoints[i + 1] - waypoints[i])
@@ -112,7 +117,7 @@ class SerpentineTrack(BaseTrack):
         self._place_obstacles()
 
         print(
-            f"Serpentine Track: {self._total_length:.0f} m, "
+            f"{self._display_name}: {self._total_length:.0f} m, "
             f"{self._num_points} points, {len(self._rect_obstacles)} obstacles"
         )
 
@@ -219,3 +224,10 @@ class SerpentineTrack(BaseTrack):
             # Approximate circular footprint for collision checks
             r_approx = 0.5 * max(rect_length, rect_width)
             self._obstacles.append((cx, cy, r_approx))
+
+
+class SerpentineTrackHorizontal(SerpentineTrack):
+    """Horizontal version of SerpentineTrack with raw waypoint x/y coordinates swapped."""
+
+    def __init__(self, num_points=1400, target_length=1400.0):
+        super().__init__(num_points=num_points, target_length=target_length, swap_xy=True)

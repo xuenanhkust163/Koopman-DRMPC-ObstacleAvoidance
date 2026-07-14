@@ -15,10 +15,11 @@ import sys
 import json
 import argparse
 import subprocess
+import shutil
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-from matplotlib.animation import FuncAnimation, PillowWriter
+from matplotlib.animation import FuncAnimation, PillowWriter, FFMpegWriter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -61,18 +62,7 @@ NUM_LAPS = 1
 LAP_FRACTION = 1.0 * NUM_LAPS
 TRACK_NAME = "SerpentineTrack"
 
-TECH_STYLE = {
-    "fig_bg": "#06111f",
-    "ax_bg": "#081827",
-    "grid": "#23445d",
-    "text": "#d9eef7",
-    "muted": "#7893a6",
-    "center": "#7bdff2",
-    "boundary": "#b7c7d6",
-    "obstacle": "#ffcc66",
-    "robust": "#37a2ff",
-    "nonrobust": "#ff4d6d",
-}
+plt.style.use("default")
 
 os.makedirs(RESULTS_DIR, exist_ok=True)
 os.makedirs(FIGURES_DIR, exist_ok=True)
@@ -216,7 +206,15 @@ def print_comparison(tag, result, track):
     }
 
 
-def generate_dual_line_animation(result_robust, result_nonrobust, track, output_path, fps=20, max_frames=300):
+def generate_dual_line_animation(
+    result_robust,
+    result_nonrobust,
+    track,
+    output_path,
+    fps=20,
+    max_frames=300,
+    fast_render=False,
+):
     """Generate a dual-line comparison animation.
 
     Robust uses blue and non-robust uses red. The longer trajectory defines
@@ -254,9 +252,8 @@ def generate_dual_line_animation(result_robust, result_nonrobust, track, output_
     boundary_left_y = track_y + TRACK_HALF_WIDTH * normal_y
     boundary_right_x = track_x - TRACK_HALF_WIDTH * normal_x
     boundary_right_y = track_y - TRACK_HALF_WIDTH * normal_y
-    
-    fig, ax = plt.subplots(figsize=(12, 8), facecolor=TECH_STYLE["fig_bg"])
-    ax.set_facecolor(TECH_STYLE["ax_bg"])
+
+    fig, ax = plt.subplots(figsize=(12, 8))
 
     # Keep a global map view instead of zooming into the traversed prefix.
     all_track_x = np.concatenate([track_x, boundary_left_x, boundary_right_x])
@@ -265,19 +262,19 @@ def generate_dual_line_animation(result_robust, result_nonrobust, track, output_
     ax.set_xlim(np.min(all_track_x) - map_margin, np.max(all_track_x) + map_margin)
     ax.set_ylim(np.min(all_track_y) - map_margin, np.max(all_track_y) + map_margin)
     
-    # Draw the track in the locked thin-line technical style.
+    # Draw the track using a plain Matplotlib style.
     ax.plot(
         track_x,
         track_y,
         linestyle=(0, (5, 4)),
-        color=TECH_STYLE["center"],
+        color='C7',
         linewidth=0.85,
         alpha=0.65,
         label='Centerline',
         zorder=2,
     )
-    ax.plot(boundary_left_x, boundary_left_y, color=TECH_STYLE["boundary"], linewidth=0.72, alpha=0.62, zorder=1)
-    ax.plot(boundary_right_x, boundary_right_y, color=TECH_STYLE["boundary"], linewidth=0.72, alpha=0.62, zorder=1)
+    ax.plot(boundary_left_x, boundary_left_y, color='C7', linewidth=0.72, alpha=0.62, zorder=1)
+    ax.plot(boundary_right_x, boundary_right_y, color='C7', linewidth=0.72, alpha=0.62, zorder=1)
 
     # Draw obstacles, preferring rectangles and falling back to circles.
     rect_obstacles = track.get_rect_obstacles()
@@ -300,7 +297,7 @@ def generate_dual_line_animation(result_robust, result_nonrobust, track, output_
                 corners,
                 closed=True,
                 linewidth=0.9,
-                edgecolor=TECH_STYLE["obstacle"],
+                edgecolor='C1',
                 facecolor='none',
                 alpha=0.78,
                 zorder=1,
@@ -312,7 +309,7 @@ def generate_dual_line_animation(result_robust, result_nonrobust, track, output_
                 (ox, oy),
                 r,
                 linewidth=0.9,
-                edgecolor=TECH_STYLE["obstacle"],
+                edgecolor='C1',
                 facecolor='none',
                 alpha=0.78,
                 zorder=1,
@@ -320,53 +317,39 @@ def generate_dual_line_animation(result_robust, result_nonrobust, track, output_
             ax.add_patch(circ)
     
     ax.set_aspect('equal')
-    ax.grid(True, color=TECH_STYLE["grid"], alpha=0.42, linewidth=0.48)
-    for spine in ax.spines.values():
-        spine.set_color(TECH_STYLE["grid"])
-        spine.set_linewidth(0.8)
-    ax.tick_params(colors=TECH_STYLE["muted"], labelsize=9)
-    ax.set_xlabel('X [m]', color=TECH_STYLE["text"])
-    ax.set_ylabel('Y [m]', color=TECH_STYLE["text"])
-    ax.set_title(
-        f'Robust vs Non-Robust Comparison on {TRACK_NAME}',
-        color=TECH_STYLE["text"],
-        fontsize=13,
-        pad=12,
-    )
+    ax.grid(True, alpha=0.3)
+    ax.set_xlabel('X [m]')
+    ax.set_ylabel('Y [m]')
+    ax.set_title(f'Robust vs Non-Robust Comparison on {TRACK_NAME}', fontsize=13, pad=12)
     
     # Initialize trajectory artists.
-    glow_r, = ax.plot([], [], color=TECH_STYLE["robust"], linewidth=3.6, alpha=0.15, zorder=4)
-    glow_nr, = ax.plot([], [], color=TECH_STYLE["nonrobust"], linewidth=3.6, alpha=0.14, zorder=4)
-    line_r, = ax.plot([], [], color=TECH_STYLE["robust"], linewidth=1.45, alpha=0.95, label='Robust K-DRMPC', zorder=5)
-    line_nr, = ax.plot([], [], color=TECH_STYLE["nonrobust"], linewidth=1.45, alpha=0.95, label='Non-Robust K-DRMPC', zorder=5)
-    point_r, = ax.plot([], [], 'o', color=TECH_STYLE["robust"], markersize=5.2, markeredgecolor='white', markeredgewidth=0.35, zorder=6)
-    point_nr, = ax.plot([], [], 'o', color=TECH_STYLE["nonrobust"], markersize=5.2, markeredgecolor='white', markeredgewidth=0.35, zorder=6)
+    glow_r, = ax.plot([], [], color='C0', linewidth=3.6, alpha=0.15, zorder=4)
+    glow_nr, = ax.plot([], [], color='C3', linewidth=3.6, alpha=0.14, zorder=4)
+    line_r, = ax.plot([], [], color='C0', linewidth=1.45, alpha=0.95, label='Robust K-DRMPC', zorder=5)
+    line_nr, = ax.plot([], [], color='C3', linewidth=1.45, alpha=0.95, label='Non-Robust K-DRMPC', zorder=5)
+    point_r, = ax.plot([], [], 'o', color='C0', markersize=5.2, markeredgecolor='white', markeredgewidth=0.35, zorder=6)
+    point_nr, = ax.plot([], [], 'o', color='C3', markersize=5.2, markeredgecolor='white', markeredgewidth=0.35, zorder=6)
     
     text_info = ax.text(0.02, 0.98, '', transform=ax.transAxes, 
                         verticalalignment='top', fontfamily='monospace',
-                        fontsize=9, color=TECH_STYLE["text"],
+                        fontsize=9,
                         bbox=dict(
                             boxstyle='round,pad=0.35',
-                            facecolor='#0d2236',
-                            edgecolor=TECH_STYLE["center"],
+                            facecolor='white',
+                            edgecolor='0.7',
                             linewidth=0.75,
-                            alpha=0.88,
+                            alpha=0.95,
                         ))
     
-    legend = ax.legend(loc='upper right', frameon=True, fontsize=9)
-    legend.get_frame().set_facecolor('#0d2236')
-    legend.get_frame().set_edgecolor(TECH_STYLE["grid"])
-    legend.get_frame().set_alpha(0.86)
-    for text in legend.get_texts():
-        text.set_color(TECH_STYLE["text"])
+    ax.legend(loc='upper right', frameon=True, fontsize=9)
 
     n_r = len(states_r)
     n_nr = len(states_nr)
     n_frames = max(n_r, n_nr)
 
     # Create end markers and hide them initially.
-    crash_r, = ax.plot([], [], 'x', color=TECH_STYLE["robust"], markersize=9, markeredgewidth=1.8, zorder=7)
-    crash_nr, = ax.plot([], [], 'x', color=TECH_STYLE["nonrobust"], markersize=9, markeredgewidth=1.8, zorder=7)
+    crash_r, = ax.plot([], [], 'x', color='C0', markersize=9, markeredgewidth=1.8, zorder=7)
+    crash_nr, = ax.plot([], [], 'x', color='C3', markersize=9, markeredgewidth=1.8, zorder=7)
 
     # Terminal steps in original simulation coordinates.
     term_step_r = orig_len_r if orig_len_r < original_len else None
@@ -433,10 +416,53 @@ def generate_dual_line_animation(result_robust, result_nonrobust, track, output_
                         frames=n_frames, interval=1000/fps,
                         blit=True, repeat=True)
     
-    writer = PillowWriter(fps=fps)
-    anim.save(output_path, writer=writer)
+    used_fast_path = False
+    if fast_render and shutil.which("ffmpeg"):
+        tmp_mp4 = output_path.rsplit('.', 1)[0] + ".mp4"
+        try:
+            # Fast path: render MP4 via ffmpeg backend, then convert to optimized GIF.
+            mp4_writer = FFMpegWriter(
+                fps=fps,
+                codec="libx264",
+                bitrate=2200,
+                extra_args=["-pix_fmt", "yuv420p"],
+            )
+            anim.save(tmp_mp4, writer=mp4_writer)
+
+            filter_graph = (
+                f"fps={fps},split[s0][s1];"
+                "[s0]palettegen=max_colors=128[p];"
+                "[s1][p]paletteuse=dither=bayer:bayer_scale=3"
+            )
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    tmp_mp4,
+                    "-vf",
+                    filter_graph,
+                    output_path,
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            used_fast_path = True
+        except Exception as exc:
+            print(f"Fast GIF path failed, fallback to PillowWriter: {exc}")
+        finally:
+            if os.path.exists(tmp_mp4):
+                os.remove(tmp_mp4)
+
+    if not used_fast_path:
+        writer = PillowWriter(fps=fps)
+        anim.save(output_path, writer=writer)
+
     plt.close(fig)
-    print(f"Saved dual-line comparison GIF: {output_path}")
+    method = "ffmpeg-fast" if used_fast_path else "pillow-fallback"
+    print(f"Saved dual-line comparison GIF ({method}): {output_path}")
 
 
 def parse_args():

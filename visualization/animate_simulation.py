@@ -22,7 +22,7 @@ from tracks.custom_track import CustomWindingTrack
 from tracks.lusail_short_track import LusailShortTrack
 from tracks.lusail_track import LusailTrack
 from tracks.sprint_oval_track import SprintOvalTrack
-from tracks.serpentine_track import SerpentineTrack
+from tracks.serpentine_track import SerpentineTrack, SerpentineTrackHorizontal
 from tracks.monaco_hairpin_track import MonacoHairpinTrack
 from tracks.suzuka_flow_track import SuzukaFlowTrack
 from tracks.spa_flow_track import SpaFlowTrack
@@ -65,6 +65,8 @@ def _build_track(track_name: str):
         return SprintOvalTrack()
     if track_name == "SerpentineTrack":
         return SerpentineTrack()
+    if track_name == "SerpentineTrackHorizontal":
+        return SerpentineTrackHorizontal()
     if track_name == "MonacoHairpinTrack":
         return MonacoHairpinTrack()
     if track_name == "SuzukaFlowTrack":

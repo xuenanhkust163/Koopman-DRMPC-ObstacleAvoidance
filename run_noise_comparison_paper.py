@@ -20,6 +20,7 @@ _cfg.ENABLE_OBSTACLES = True
 
 from config import CONTROL_UPDATE_INTERVAL, FIGURES_DIR, RESULTS_DIR  # noqa: E402
 from controllers.kdrmpc_paper_controller import KDRMPCPaperController  # noqa: E402
+from controllers.kdrmpc_paper_qp_controller import KDRMPCPaperQPController  # noqa: E402
 from disturbance.disturbance_generator import DisturbanceGenerator  # noqa: E402
 from run_noise_comparison import (  # noqa: E402
     DEFAULT_EPSILON,
@@ -34,11 +35,24 @@ from run_noise_comparison import (  # noqa: E402
     print_comparison,
 )
 from simulation.simulator import Simulator  # noqa: E402
-from tracks.serpentine_track import SerpentineTrack  # noqa: E402
+from tracks.serpentine_track import SerpentineTrack, SerpentineTrackHorizontal  # noqa: E402
 import numpy as np  # noqa: E402
 
 PAPER_DUAL_GIF_TEMPLATE = "Comparison_{track}_paper_dual_line{suffix}.gif"
+PAPER_DUAL_PNG_TEMPLATE = "Comparison_{track}_paper_dual_trajectory{suffix}.png"
 PAPER_SUMMARY_TEMPLATE = "noise_comparison_paper_summary{suffix}.json"
+TRACK_BUILDERS = {
+    "SerpentineTrack": SerpentineTrack,
+    "SerpentineTrackHorizontal": SerpentineTrackHorizontal,
+}
+
+
+def build_track(track_name):
+    try:
+        return TRACK_BUILDERS[track_name]()
+    except KeyError as exc:
+        supported = ", ".join(sorted(TRACK_BUILDERS))
+        raise ValueError(f"Unsupported track name: {track_name}. Supported: {supported}") from exc
 
 
 def persist_result(result, filename):
@@ -50,10 +64,64 @@ def persist_result(result, filename):
     return path
 
 
-def cleanup_previous_outputs(tags, suffix=""):
+def generate_dual_trajectory_png(result_robust, result_nonrobust, track, save_path):
+    """Render a single static red/blue full-trajectory comparison PNG."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Circle
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+    robust_states = result_robust.to_arrays()["states"]
+    nonrobust_states = result_nonrobust.to_arrays()["states"]
+
+    cx, cy = track.get_centerline()
+    heading = track.get_heading()
+    nx = -np.sin(heading)
+    ny = np.cos(heading)
+    half_width = float(_cfg.PLOT_TRACK_HALF_WIDTH)
+    left_x = cx + half_width * nx
+    left_y = cy + half_width * ny
+    right_x = cx - half_width * nx
+    right_y = cy - half_width * ny
+
+    fig, ax = plt.subplots(1, 1, figsize=(13, 8), constrained_layout=True)
+    ax.plot(left_x, left_y, color="#4a4a4a", linewidth=1.0, alpha=0.9)
+    ax.plot(right_x, right_y, color="#4a4a4a", linewidth=1.0, alpha=0.9)
+    ax.plot(cx, cy, linestyle="--", color="#9a9a9a", linewidth=1.0, alpha=0.7)
+
+    for ox, oy, radius in track.get_obstacles():
+        obstacle = Circle((ox, oy), radius, facecolor="#7a7a7a", edgecolor="#555555", alpha=0.25, linewidth=0.8)
+        ax.add_patch(obstacle)
+
+    ax.plot(nonrobust_states[:, 0], nonrobust_states[:, 1], color="#d62728", linewidth=1.0, alpha=0.95, label="Non-robust")
+    ax.plot(robust_states[:, 0], robust_states[:, 1], color="#1f77b4", linewidth=1.0, alpha=0.95, label="Robust")
+
+    ax.plot(nonrobust_states[0, 0], nonrobust_states[0, 1], marker="o", color="#d62728", markersize=5)
+    ax.plot(robust_states[0, 0], robust_states[0, 1], marker="o", color="#1f77b4", markersize=5)
+
+    if getattr(result_nonrobust, "crashed", False):
+        ax.plot(nonrobust_states[-1, 0], nonrobust_states[-1, 1], marker="x", color="#d62728", markersize=9, mew=2.0)
+    if getattr(result_robust, "crashed", False):
+        ax.plot(robust_states[-1, 0], robust_states[-1, 1], marker="x", color="#1f77b4", markersize=9, mew=2.0)
+
+    ax.set_title(f"Paper Trajectory Comparison: {track.__class__.__name__}")
+    ax.set_xlabel("X Position (m)")
+    ax.set_ylabel("Y Position (m)")
+    ax.set_aspect("equal")
+    ax.grid(True, alpha=0.18)
+    ax.legend(loc="best")
+
+    fig.savefig(save_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved paper trajectory PNG: {save_path}")
+
+
+def cleanup_previous_outputs(tags, suffix="", track_name=TRACK_NAME):
     removed = []
     for tag in tags:
-        base = f"{tag}_{TRACK_NAME}"
+        base = f"{tag}_{track_name}"
         path = os.path.join(RESULTS_DIR, f"{base}.pkl")
         if os.path.exists(path):
             os.remove(path)
@@ -61,11 +129,19 @@ def cleanup_previous_outputs(tags, suffix=""):
 
     comparison_gif = os.path.join(
         FIGURES_DIR,
-        PAPER_DUAL_GIF_TEMPLATE.format(track=TRACK_NAME, suffix=suffix),
+        PAPER_DUAL_GIF_TEMPLATE.format(track=track_name, suffix=suffix),
     )
     if os.path.exists(comparison_gif):
         os.remove(comparison_gif)
         removed.append(comparison_gif)
+
+    comparison_png = os.path.join(
+        FIGURES_DIR,
+        PAPER_DUAL_PNG_TEMPLATE.format(track=track_name, suffix=suffix),
+    )
+    if os.path.exists(comparison_png):
+        os.remove(comparison_png)
+        removed.append(comparison_png)
 
     summary_path = os.path.join(
         RESULTS_DIR,
@@ -124,13 +200,25 @@ def run_experiment(
     robust_obstacle_speed_preview,
     robust_obstacle_accel_weight,
     control_update_interval,
+    controller_formulation,
+    qp_solver,
+    track_name,
 ):
-    track = SerpentineTrack()
+    track = build_track(track_name)
     dist_gen = DisturbanceGenerator(sigma=sigma, seed=seed)
     w_empirical = dist_gen.get_empirical_samples(N_DISTURBANCE_SAMPLES)
 
     obstacle_strategy = "robust" if robust else "non-robust"
-    controller = KDRMPCPaperController(
+    controller_cls = (
+        KDRMPCPaperQPController
+        if controller_formulation == "qp"
+        else KDRMPCPaperController
+    )
+    controller_kwargs = {}
+    if controller_formulation == "qp":
+        controller_kwargs["qp_solver"] = qp_solver
+
+    controller = controller_cls(
         model,
         D,
         norm_params,
@@ -154,6 +242,7 @@ def run_experiment(
         robust_obstacle_speed_weight=(robust_obstacle_speed_weight if robust else 0.0),
         robust_obstacle_speed_preview=robust_obstacle_speed_preview,
         robust_obstacle_accel_weight=(robust_obstacle_accel_weight if robust else 0.0),
+        **controller_kwargs,
     )
 
     simulator = Simulator(track, controller, dist_gen)
@@ -168,7 +257,7 @@ def run_experiment(
         control_update_interval=control_update_interval,
     )
 
-    persist_result(result, f"{tag}_{TRACK_NAME}.pkl")
+    persist_result(result, f"{tag}_{track_name}.pkl")
     return result, track
 
 
@@ -188,6 +277,24 @@ def parse_args():
         help="solve MPC every N simulation steps; held control is used between solves",
     )
     parser.add_argument("--start-s", type=float, default=None, help="optional initial arclength position [m]")
+    parser.add_argument(
+        "--track-name",
+        choices=sorted(TRACK_BUILDERS),
+        default=TRACK_NAME,
+        help="track geometry used for the robust/nonrobust comparison",
+    )
+    parser.add_argument(
+        "--controller-formulation",
+        choices=["qp", "nlp"],
+        default="qp",
+        help="paper controller formulation: convex QP or legacy IPOPT NLP",
+    )
+    parser.add_argument(
+        "--qp-solver",
+        choices=["osqp", "qpoases", "qrqp"],
+        default="qpoases",
+        help="CasADi qpsol plugin used when --controller-formulation=qp",
+    )
     parser.add_argument(
         "--halfspace-mode",
         choices=["track-normal", "axis"],
@@ -308,17 +415,22 @@ def main():
     robust_obstacle_speed_weight = float(args.robust_obstacle_speed_weight)
     robust_obstacle_speed_preview = float(args.robust_obstacle_speed_preview)
     robust_obstacle_accel_weight = float(args.robust_obstacle_accel_weight)
+    controller_formulation = args.controller_formulation
+    qp_solver = args.qp_solver
+    track_name = args.track_name
     suffix = args.name_suffix
     if suffix and not suffix.startswith("_"):
         suffix = f"_{suffix}"
 
-    robust_tag = f"Robust_K-DRMPC-Paper{suffix}"
-    nonrobust_tag = f"NonRobust_K-DRMPC-Paper{suffix}"
-    cleanup_previous_outputs([robust_tag, nonrobust_tag], suffix=suffix)
+    controller_tag = "Paper-QP" if controller_formulation == "qp" else "Paper"
+    robust_tag = f"Robust_K-DRMPC-{controller_tag}{suffix}"
+    nonrobust_tag = f"NonRobust_K-DRMPC-{controller_tag}{suffix}"
+    cleanup_previous_outputs([robust_tag, nonrobust_tag], suffix=suffix, track_name=track_name)
 
     print("=" * 60)
     print("Paper controller comparison: Robust vs Non-Robust K-DRMPC")
-    print(f"Track: {TRACK_NAME} | {max_steps} steps | sigma: {sigma}")
+    print(f"Track: {track_name} | {max_steps} steps | sigma: {sigma}")
+    print(f"controller_formulation={controller_formulation}, qp_solver={qp_solver}")
     print(f"control_update_interval={control_update_interval}")
     if start_s is not None:
         print(f"start_s={float(start_s):.2f} m")
@@ -376,6 +488,9 @@ def main():
         robust_obstacle_speed_preview=robust_obstacle_speed_preview,
         robust_obstacle_accel_weight=robust_obstacle_accel_weight,
         control_update_interval=control_update_interval,
+        controller_formulation=controller_formulation,
+        qp_solver=qp_solver,
+        track_name=track_name,
     )
 
     print("\n\n" + "#" * 60)
@@ -407,13 +522,16 @@ def main():
         robust_obstacle_speed_preview=robust_obstacle_speed_preview,
         robust_obstacle_accel_weight=robust_obstacle_accel_weight,
         control_update_interval=control_update_interval,
+        controller_formulation=controller_formulation,
+        qp_solver=qp_solver,
+        track_name=track_name,
     )
 
     print("\n\n" + "█" * 60)
     print("█  Paper comparison summary")
     print("█" * 60)
-    metrics_r = print_comparison("Robust K-DRMPC-Paper", result_robust, track_r)
-    metrics_nr = print_comparison("Non-Robust K-DRMPC-Paper", result_nonrobust, track_r)
+    metrics_r = print_comparison(f"Robust K-DRMPC-{controller_tag}", result_robust, track_r)
+    metrics_nr = print_comparison(f"Non-Robust K-DRMPC-{controller_tag}", result_nonrobust, track_r)
 
     print("\n" + "=" * 60)
     print("  Difference analysis (Robust - NonRobust)")
@@ -436,7 +554,11 @@ def main():
 
     dual_gif_path = os.path.join(
         FIGURES_DIR,
-        PAPER_DUAL_GIF_TEMPLATE.format(track=TRACK_NAME, suffix=suffix),
+        PAPER_DUAL_GIF_TEMPLATE.format(track=track_name, suffix=suffix),
+    )
+    dual_png_path = os.path.join(
+        FIGURES_DIR,
+        PAPER_DUAL_PNG_TEMPLATE.format(track=track_name, suffix=suffix),
     )
     if args.skip_animation:
         dual_gif_path = None
@@ -447,6 +569,11 @@ def main():
         print("#" * 60)
         generate_dual_line_animation(result_robust, result_nonrobust, track_r, dual_gif_path, fps=20, max_frames=300)
 
+    print("\n\n" + "#" * 60)
+    print("# Generating paper full-trajectory PNG...")
+    print("#" * 60)
+    generate_dual_trajectory_png(result_robust, result_nonrobust, track_r, dual_png_path)
+
     summary = {
         "robust": metrics_r,
         "nonrobust": metrics_nr,
@@ -455,6 +582,9 @@ def main():
         "epsilon": epsilon,
         "seed": seed,
         "max_steps": max_steps,
+        "track_name": track_name,
+        "controller_formulation": controller_formulation,
+        "qp_solver": qp_solver if controller_formulation == "qp" else None,
         "control_update_interval": control_update_interval,
         "start_s": start_s,
         "halfspace_mode": halfspace_mode,
@@ -477,7 +607,8 @@ def main():
         "robust_tag": robust_tag,
         "nonrobust_tag": nonrobust_tag,
         "dual_gif": dual_gif_path,
-        "controller": "KDRMPCPaperController",
+        "dual_png": dual_png_path,
+        "controller": "KDRMPCPaperQPController" if controller_formulation == "qp" else "KDRMPCPaperController",
     }
     suffix_name = suffix if suffix else ""
     summary_path = os.path.join(
