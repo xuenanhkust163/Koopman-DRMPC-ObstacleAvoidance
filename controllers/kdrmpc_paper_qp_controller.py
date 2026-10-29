@@ -34,6 +34,12 @@ class QPEngineeringConfig:
     progress_reward_weight: float = 0.25
     terminal_weight_scale: float = 1.0
     lateral_centering_weight: float = 12.0
+    steering_rate_weight_scale: float = 1.0
+    steering_abs_weight_scale: float = 1.0
+    steering_curvature_weight: float = 0.0
+    obstacle_lateral_bias_weight: float = 18.0
+    obstacle_speed_cap_base: float = 2.0
+    obstacle_speed_cap_gain: float = 0.10
     lateral_speed_cap_gain: float = 0.9
     lateral_speed_cap_base: float = 2.4
     linear_physical_consistency: bool = True
@@ -63,6 +69,12 @@ _ENGINEERING_KWARG_NAMES = {
     "progress_reward_weight",
     "terminal_weight_scale",
     "lateral_centering_weight",
+    "steering_rate_weight_scale",
+    "steering_abs_weight_scale",
+    "steering_curvature_weight",
+    "obstacle_lateral_bias_weight",
+    "obstacle_speed_cap_base",
+    "obstacle_speed_cap_gain",
     "lateral_speed_cap_gain",
     "lateral_speed_cap_base",
     "linear_physical_consistency",
@@ -111,6 +123,12 @@ class KDRMPCPaperQPController(KDRMPCPaperController):
         self.progress_reward_weight = float(self.engineering_config.progress_reward_weight)
         self.terminal_weight_scale = float(self.engineering_config.terminal_weight_scale)
         self.lateral_centering_weight = float(self.engineering_config.lateral_centering_weight)
+        self.steering_rate_weight_scale = float(self.engineering_config.steering_rate_weight_scale)
+        self.steering_abs_weight_scale = float(self.engineering_config.steering_abs_weight_scale)
+        self.steering_curvature_weight = float(self.engineering_config.steering_curvature_weight)
+        self.obstacle_lateral_bias_weight = float(self.engineering_config.obstacle_lateral_bias_weight)
+        self.obstacle_speed_cap_base = float(self.engineering_config.obstacle_speed_cap_base)
+        self.obstacle_speed_cap_gain = float(self.engineering_config.obstacle_speed_cap_gain)
         self.lateral_speed_cap_gain = float(self.engineering_config.lateral_speed_cap_gain)
         self.lateral_speed_cap_base = float(self.engineering_config.lateral_speed_cap_base)
         self.linear_physical_consistency = bool(self.engineering_config.linear_physical_consistency)
@@ -123,7 +141,7 @@ class KDRMPCPaperQPController(KDRMPCPaperController):
     def _wrap_to_pi(angle):
         return (float(angle) + np.pi) % (2.0 * np.pi) - np.pi
 
-    def _recovery_control(self, x_current, ref_trajectory):
+    def _recovery_control(self, x_current, ref_trajectory, obstacles=None):
         """Fallback tracking policy used when QP solve fails.
 
         This avoids persistent near-zero-speed stalling from repeatedly reusing
@@ -144,6 +162,54 @@ class KDRMPCPaperQPController(KDRMPCPaperController):
         # Slow down when far from lane center to prevent boundary divergence.
         a_cmd -= 0.15 * max(0.0, abs(e_lat) - 2.5)
         delta_cmd = self.fallback_heading_gain * e_psi - self.fallback_lateral_gain * e_lat
+
+        # If the QP is failing near obstacles, bias the fallback away from the
+        # nearest obstacle instead of continuing to track the centerline.
+        if obstacles and self.track is not None:
+            px = float(x_current[0])
+            py = float(x_current[1])
+            try:
+                _, ego_s, ego_lat = self.track.closest_point(px, py)
+                total_length = float(self.track.total_length())
+            except Exception:
+                ego_s = None
+                ego_lat = None
+                total_length = None
+
+            nearest_obs = None
+            for obs in obstacles:
+                ox, oy, radius = obs
+                dist = float(np.hypot(px - float(ox), py - float(oy)))
+                if nearest_obs is None or dist < nearest_obs[0]:
+                    nearest_obs = (dist, float(ox), float(oy), float(radius))
+
+            if nearest_obs is not None:
+                dist, ox, oy, radius = nearest_obs
+                try:
+                    _, obs_s, obs_lat = self.track.closest_point(ox, oy)
+                    if ego_s is not None and total_length is not None:
+                        forward_gap = (float(obs_s) - float(ego_s)) % total_length
+                    else:
+                        forward_gap = dist
+                except Exception:
+                    obs_lat = 0.0
+                    forward_gap = dist
+
+                safety_margin = radius + base.VEHICLE_RADIUS + base.D_SAFE + 4.0
+                if forward_gap <= 60.0 or dist <= safety_margin:
+                    away_sign = -np.sign(obs_lat) if obs_lat != 0.0 else 0.0
+                    if away_sign == 0.0 and ego_lat is not None:
+                        away_sign = -np.sign(float(ego_lat))
+                    if away_sign == 0.0:
+                        away_sign = -1.0
+
+                    distance_scale = max(dist - radius, 1.0)
+                    delta_cmd += away_sign * (1.0 + 3.0 / distance_scale)
+
+                    # Brake harder when an obstacle is ahead so the vehicle has
+                    # time to turn before the fallback path reaches the edge.
+                    desired_speed_cap = min(v_ref, max(0.8, 1.35 - 0.02 * min(forward_gap, 30.0)))
+                    a_cmd -= 0.25 * max(0.0, v_cur - desired_speed_cap)
 
         a_cmd = float(np.clip(a_cmd, base.A_MIN, base.A_MAX))
         delta_cmd = float(np.clip(delta_cmd, -base.DELTA_MAX, base.DELTA_MAX))
@@ -198,11 +264,12 @@ class KDRMPCPaperQPController(KDRMPCPaperController):
     def _select_nearby_obstacles(self, x_current, obstacles):
         px = float(x_current[0])
         py = float(x_current[1])
+        preview_distance = max(float(base.OBSTACLE_PROXIMITY), 80.0)
 
         if self.track is None:
             return [
                 obs for obs in obstacles
-                if np.hypot(px - float(obs[0]), py - float(obs[1])) < base.OBSTACLE_PROXIMITY
+                if np.hypot(px - float(obs[0]), py - float(obs[1])) < preview_distance
             ]
 
         try:
@@ -211,13 +278,13 @@ class KDRMPCPaperQPController(KDRMPCPaperController):
         except Exception:
             return [
                 obs for obs in obstacles
-                if np.hypot(px - float(obs[0]), py - float(obs[1])) < base.OBSTACLE_PROXIMITY
+                if np.hypot(px - float(obs[0]), py - float(obs[1])) < preview_distance
             ]
 
         nearby_obstacles = []
         for obs in obstacles:
             ox, oy, _ = obs
-            if np.hypot(px - float(ox), py - float(oy)) >= base.OBSTACLE_PROXIMITY:
+            if np.hypot(px - float(ox), py - float(oy)) >= preview_distance:
                 continue
 
             try:
@@ -229,12 +296,64 @@ class KDRMPCPaperQPController(KDRMPCPaperController):
 
             if forward_gap > 0.5 * total_length:
                 continue
-            if forward_gap > base.OBSTACLE_PROXIMITY:
+            if forward_gap > preview_distance:
                 continue
 
             nearby_obstacles.append(obs)
 
         return nearby_obstacles
+
+    def _obstacle_guidance_profile(self, ref_trajectory, obstacles, T):
+        lateral_targets = [None] * (T + 1)
+        speed_caps = [None] * (T + 1)
+
+        if self.track is None or not obstacles:
+            return lateral_targets, speed_caps
+
+        safe_track_lat = max(0.0, base.TRACK_HALF_WIDTH - base.VEHICLE_RADIUS - 0.5)
+        total_length = float(self.track.total_length())
+
+        for tc in range(1, T + 1):
+            ref_idx = min(max(tc - 1, 0), len(ref_trajectory) - 1)
+            ref_x = float(ref_trajectory[ref_idx, 0])
+            ref_y = float(ref_trajectory[ref_idx, 1])
+            try:
+                _, ref_s, _ = self.track.closest_point(ref_x, ref_y)
+            except Exception:
+                continue
+
+            target_candidates = []
+            cap_candidates = []
+            for obs in obstacles:
+                ox, oy, radius = obs
+                try:
+                    _, obs_s, obs_lat = self.track.closest_point(float(ox), float(oy))
+                except Exception:
+                    continue
+
+                forward_gap = (float(obs_s) - float(ref_s)) % total_length
+                if forward_gap > 0.5 * total_length:
+                    continue
+
+                if forward_gap > 70.0:
+                    continue
+
+                if self._obstacle_active_at_step(ref_trajectory, tc, obs):
+                    lateral_bias_margin = 0.8
+                    if obs_lat >= 0.0:
+                        target_lat = float(obs_lat - radius - lateral_bias_margin)
+                    else:
+                        target_lat = float(obs_lat + radius + lateral_bias_margin)
+                    target_lat = float(np.clip(target_lat, -safe_track_lat, safe_track_lat))
+                    target_candidates.append(target_lat)
+
+                cap_candidates.append(self.obstacle_speed_cap_base + self.obstacle_speed_cap_gain * max(forward_gap, 0.0))
+
+            if target_candidates:
+                lateral_targets[tc] = min(target_candidates) if min(target_candidates) < 0.0 else max(target_candidates)
+                speed_caps[tc] = float(max(base.MIN_SPEED_FLOOR, min(cap_candidates)))
+
+        return lateral_targets, speed_caps
 
     def solve(self, x_current, ref_trajectory, obstacles, u_prev=None):
         if u_prev is not None:
@@ -246,6 +365,11 @@ class KDRMPCPaperQPController(KDRMPCPaperController):
         n_z = self.A.shape[0]
 
         nearby_obstacles = self._select_nearby_obstacles(x_current, obstacles)
+        obstacle_lateral_targets, obstacle_speed_caps = self._obstacle_guidance_profile(
+            ref_trajectory,
+            nearby_obstacles,
+            T,
+        )
 
         check_steps = list(range(1, T + 1))
         w_phys_samples = self._physical_disturbance_samples()
@@ -273,6 +397,11 @@ class KDRMPCPaperQPController(KDRMPCPaperController):
             ]
             for t in range(T)
         ])
+
+        for t in range(T):
+            obstacle_speed_cap = obstacle_speed_caps[t + 1]
+            if obstacle_speed_cap is not None:
+                y_ref[t, 0] = min(y_ref[t, 0], obstacle_speed_cap)
 
         px_std = float(self.norm_params["px_std"])
         py_std = float(self.norm_params["py_std"])
@@ -318,8 +447,17 @@ class KDRMPCPaperQPController(KDRMPCPaperController):
             if self.linear_physical_consistency:
                 psi_ref_t = float(ref_psi[t])
                 v_ref_t = max(float(y_ref[t, 0]), 0.1)
-                px_next = Z[-1][0] + base.DT * np.cos(psi_ref_t) * Z[-1][base.IDX_V] / self._px_std
-                py_next = Z[-1][1] + base.DT * np.sin(psi_ref_t) * Z[-1][base.IDX_V] / self._py_std
+                psi_dev = Z[-1][base.IDX_PSI] - psi_ref_t
+                px_step_phys = (
+                    np.cos(psi_ref_t) * Z[-1][base.IDX_V]
+                    - v_ref_t * np.sin(psi_ref_t) * psi_dev
+                )
+                py_step_phys = (
+                    np.sin(psi_ref_t) * Z[-1][base.IDX_V]
+                    + v_ref_t * np.cos(psi_ref_t) * psi_dev
+                )
+                px_next = Z[-1][0] + base.DT * px_step_phys / self._px_std
+                py_next = Z[-1][1] + base.DT * py_step_phys / self._py_std
                 v_next = Z[-1][base.IDX_V] + base.DT * u_t[0]
                 omega_next = (v_ref_t / base.L_WHEELBASE) * u_t[1]
                 psi_next = Z[-1][base.IDX_PSI] + base.DT * omega_next
@@ -328,8 +466,12 @@ class KDRMPCPaperQPController(KDRMPCPaperController):
                 Z.append(z_koop)
 
         Q = ca.SX(base.Q_WEIGHTS)
-        R = ca.SX(base.R_WEIGHTS)
-        R_abs = ca.SX(base.R_ABS_WEIGHTS)
+        r_weights = np.array(base.R_WEIGHTS, dtype=float, copy=True)
+        r_abs_weights = np.array(base.R_ABS_WEIGHTS, dtype=float, copy=True)
+        r_weights[1, 1] *= self.steering_rate_weight_scale
+        r_abs_weights[1, 1] *= self.steering_abs_weight_scale
+        R = ca.SX(r_weights)
+        R_abs = ca.SX(r_abs_weights)
 
         cost = 0
         for t in range(T):
@@ -345,6 +487,11 @@ class KDRMPCPaperQPController(KDRMPCPaperController):
             cost += ca.mtimes([y_err.T, Q, y_err])
             cost += ca.mtimes([du.T, R, du])
             cost += ca.mtimes([u_t.T, R_abs, u_t])
+            if self.steering_curvature_weight > 0.0 and t >= 1:
+                prev_delta = U[base.N_U * (t - 1) + 1]
+                prev_prev_delta = float(self.u_prev[1]) if t == 1 else U[base.N_U * (t - 2) + 1]
+                delta_curvature = u_t[1] - 2.0 * prev_delta + prev_prev_delta
+                cost += self.steering_curvature_weight * (delta_curvature ** 2)
             cost -= self.progress_reward_weight * Z[t + 1][base.IDX_V]
 
             psi_err = ca.mtimes(D_psi_ca, Z[t])[0] - float(ref_psi[t])
@@ -359,6 +506,10 @@ class KDRMPCPaperQPController(KDRMPCPaperController):
             # low-speed lateral drift accumulation in long runs.
             d_lat_t = -np.sin(float(ref_psi[t])) * ((pos[0] - float(ref_px_norm[t])) * px_std) + np.cos(float(ref_psi[t])) * ((pos[1] - float(ref_py_norm[t])) * py_std)
             cost += self.lateral_centering_weight * (d_lat_t ** 2)
+
+            obstacle_target_lat = obstacle_lateral_targets[t + 1]
+            if obstacle_target_lat is not None:
+                cost += self.obstacle_lateral_bias_weight * ((d_lat_t - obstacle_target_lat) ** 2)
 
             if self.use_worst_case_cost and self.obstacle_strategy == "robust" and self.N_samples > 0:
                 sample_cost = 0
@@ -420,6 +571,10 @@ class KDRMPCPaperQPController(KDRMPCPaperController):
             v_floor = max(min_speed_floor, base.MIN_SPEED_REF_RATIO * float(y_ref[t, 0]))
             add_bound(Z[t][base.IDX_V] + v_slack[t], v_floor, ca.inf)
 
+            obstacle_speed_cap = obstacle_speed_caps[t + 1]
+            if obstacle_speed_cap is not None:
+                add_bound(Z[t + 1][base.IDX_V], -ca.inf, obstacle_speed_cap)
+
         for t in range(T + 1):
             add_bound(track_slack[t], 0.0, self.track_slack_max)
             add_bound(heading_slack[t], 0.0, self.heading_slack_max)
@@ -476,14 +631,20 @@ class KDRMPCPaperQPController(KDRMPCPaperController):
                     add_bound(s[i] - l_nom - sample_loss_i - lam * c_norm, 0.0, ca.inf)
                 risk_upper = lam * self.theta + ca.sum1(s) / float(max(self.N_samples, 1))
                 if obs_slack is not None:
-                    add_bound(obs_slack[obs_slack_idx], 0.0, ca.inf)
+                    if self.hard_obstacle_constraints:
+                        add_bound(obs_slack[obs_slack_idx], 0.0, 0.0)
+                    else:
+                        add_bound(obs_slack[obs_slack_idx], 0.0, ca.inf)
                     add_bound(risk_upper - obs_slack[obs_slack_idx], -ca.inf, self.epsilon)
                     obs_slack_idx += 1
                 else:
                     add_bound(risk_upper, -ca.inf, self.epsilon)
             else:
                 if obs_slack is not None:
-                    add_bound(obs_slack[obs_slack_idx], 0.0, ca.inf)
+                    if self.hard_obstacle_constraints:
+                        add_bound(obs_slack[obs_slack_idx], 0.0, 0.0)
+                    else:
+                        add_bound(obs_slack[obs_slack_idx], 0.0, ca.inf)
                     add_bound(l_nom - obs_slack[obs_slack_idx], -ca.inf, 0.0)
                     obs_slack_idx += 1
                 else:
@@ -522,7 +683,33 @@ class KDRMPCPaperQPController(KDRMPCPaperController):
                 "obs_slack_max": 0.0,
             }
         except Exception as exc:
-            u_opt = self._recovery_control(x_current, ref_trajectory)
+            if (
+                self.obstacle_strategy == "robust"
+                and self.hard_obstacle_constraints
+                and self.halfspace_mode == "track-normal"
+                and active_obstacle_pairs
+            ):
+                failed_attempt_time = time.time() - t_start
+                self._qp_warm_start = None
+                self.halfspace_mode = "axis"
+                try:
+                    fallback_control, fallback_info = self.solve(
+                        x_current,
+                        ref_trajectory,
+                        obstacles,
+                        u_prev=self.u_prev,
+                    )
+                finally:
+                    self.halfspace_mode = "track-normal"
+
+                if not str(fallback_info.get("status", "")).startswith("failed"):
+                    fallback_info["status"] = "optimal_axis_halfspace_fallback"
+                    fallback_info["solve_time"] += failed_attempt_time
+                    fallback_info["halfspace_fallback_from"] = "track-normal"
+                    fallback_info["halfspace_fallback_reason"] = str(exc)[:240]
+                    return fallback_control, fallback_info
+
+            u_opt = self._recovery_control(x_current, ref_trajectory, nearby_obstacles)
             status = f"failed: {str(exc)[:80]}"
             self._qp_warm_start = None
             debug_info = {

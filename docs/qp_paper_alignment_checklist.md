@@ -59,3 +59,13 @@ The current QP controller should be described as:
 "Paper-core aligned convex QP controller with a small set of engineering safeguards for numerical robustness and closed-loop stability."
 
 That is the most accurate wording if the goal is to claim theoretical alignment without overstating that the implementation is a line-by-line transcription of the manuscript.
+
+## Disturbance Experiment Protocol
+
+The manuscript models the physical disturbance additively in the plant transition and then represents its combined lifted effect as `hat{w}`. Use `run_obstacle_free_lap.py --process-disturbance` for that experiment path. The existing `--measurement-noise` option perturbs only controller observations and is a diagnostic mode, not the manuscript disturbance protocol.
+
+The runner's paper-QP defaults are `theta=0.10` and `epsilon=0.10`. The nominal disturbance scale is `NOMINAL_SIGMA=0.5`; shifted plant settings are `0.75` and `1.0`. The robust controller's empirical ambiguity samples remain at the nominal scale while the plant disturbance is shifted, as required for the distribution-shift comparison.
+
+The state-space scaling currently shared by plant disturbance injection and the QP disturbance samples is `[0.1, 0.1, 0.01, 0.05, 0.01]` in state order `[px, py, psi, v, omega]`. The manuscript should report these physical units/scales and define how the five-dimensional physical disturbance maps to the lifted disturbance `hat{w}`. This is an underspecification to resolve in the text; no mathematical error in the additive disturbance model has been identified.
+
+Earlier runs made with `--measurement-noise` should be retained as sensor-noise diagnostics, but not reported as reproductions of the paper's disturbance-shift experiments.

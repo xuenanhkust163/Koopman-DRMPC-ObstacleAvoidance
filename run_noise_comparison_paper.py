@@ -35,7 +35,7 @@ from run_noise_comparison import (  # noqa: E402
     print_comparison,
 )
 from simulation.simulator import Simulator  # noqa: E402
-from tracks.serpentine_track import SerpentineTrack, SerpentineTrackHorizontal  # noqa: E402
+from tracks.serpentine_track import SerpentineTrack  # noqa: E402
 import numpy as np  # noqa: E402
 
 PAPER_DUAL_GIF_TEMPLATE = "Comparison_{track}_paper_dual_line{suffix}.gif"
@@ -43,7 +43,6 @@ PAPER_DUAL_PNG_TEMPLATE = "Comparison_{track}_paper_dual_trajectory{suffix}.png"
 PAPER_SUMMARY_TEMPLATE = "noise_comparison_paper_summary{suffix}.json"
 TRACK_BUILDERS = {
     "SerpentineTrack": SerpentineTrack,
-    "SerpentineTrackHorizontal": SerpentineTrackHorizontal,
 }
 
 
@@ -95,8 +94,8 @@ def generate_dual_trajectory_png(result_robust, result_nonrobust, track, save_pa
         obstacle = Circle((ox, oy), radius, facecolor="#7a7a7a", edgecolor="#555555", alpha=0.25, linewidth=0.8)
         ax.add_patch(obstacle)
 
-    ax.plot(nonrobust_states[:, 0], nonrobust_states[:, 1], color="#d62728", linewidth=1.0, alpha=0.95, label="Non-robust")
-    ax.plot(robust_states[:, 0], robust_states[:, 1], color="#1f77b4", linewidth=1.0, alpha=0.95, label="Robust")
+    ax.plot(nonrobust_states[:, 0], nonrobust_states[:, 1], color="#d62728", linewidth=0.85, alpha=0.95, label="Non-robust")
+    ax.plot(robust_states[:, 0], robust_states[:, 1], color="#1f77b4", linewidth=0.85, alpha=0.95, label="Robust")
 
     ax.plot(nonrobust_states[0, 0], nonrobust_states[0, 1], marker="o", color="#d62728", markersize=5)
     ax.plot(robust_states[0, 0], robust_states[0, 1], marker="o", color="#1f77b4", markersize=5)
@@ -199,6 +198,13 @@ def run_experiment(
     robust_obstacle_speed_weight,
     robust_obstacle_speed_preview,
     robust_obstacle_accel_weight,
+    obstacle_lateral_bias_weight,
+    obstacle_speed_cap_base,
+    obstacle_speed_cap_gain,
+    steering_blend,
+    adaptive_steering_relief,
+    steering_relief_lateral_threshold,
+    steering_relief_obstacle_distance,
     control_update_interval,
     controller_formulation,
     qp_solver,
@@ -242,6 +248,9 @@ def run_experiment(
         robust_obstacle_speed_weight=(robust_obstacle_speed_weight if robust else 0.0),
         robust_obstacle_speed_preview=robust_obstacle_speed_preview,
         robust_obstacle_accel_weight=(robust_obstacle_accel_weight if robust else 0.0),
+        obstacle_lateral_bias_weight=obstacle_lateral_bias_weight,
+        obstacle_speed_cap_base=obstacle_speed_cap_base,
+        obstacle_speed_cap_gain=obstacle_speed_cap_gain,
         **controller_kwargs,
     )
 
@@ -254,6 +263,10 @@ def run_experiment(
         lap_fraction=1.0,
         detailed_step_log=True,
         detailed_step_log_max_steps=10,
+        steering_blend=steering_blend,
+        adaptive_steering_relief=adaptive_steering_relief,
+        steering_relief_lateral_threshold=steering_relief_lateral_threshold,
+        steering_relief_obstacle_distance=steering_relief_obstacle_distance,
         control_update_interval=control_update_interval,
     )
 
@@ -383,9 +396,50 @@ def parse_args():
         help="robust-only objective weight on positive acceleration during active obstacle windows",
     )
     parser.add_argument(
-        "--skip-animation",
+        "--obstacle-lateral-bias-weight",
+        type=float,
+        default=18.0,
+        help="QP engineering weight for obstacle-driven lateral target bias",
+    )
+    parser.add_argument(
+        "--obstacle-speed-cap-base",
+        type=float,
+        default=2.0,
+        help="base obstacle-window speed cap in m/s",
+    )
+    parser.add_argument(
+        "--obstacle-speed-cap-gain",
+        type=float,
+        default=0.10,
+        help="linear gain on forward-gap for obstacle-window speed cap",
+    )
+    parser.add_argument(
+        "--steering-blend",
+        type=float,
+        default=1.0,
+        help="blend factor for newly solved steering; lower values produce smoother paths",
+    )
+    parser.add_argument(
+        "--adaptive-steering-relief",
         action="store_true",
-        help="skip dual-line GIF generation for long validation runs",
+        help="increase steering responsiveness near risk while keeping smoothing in safer regions",
+    )
+    parser.add_argument(
+        "--steering-relief-lateral-threshold",
+        type=float,
+        default=6.0,
+        help="lateral error threshold [m] where adaptive steering relief reaches full strength",
+    )
+    parser.add_argument(
+        "--steering-relief-obstacle-distance",
+        type=float,
+        default=10.0,
+        help="obstacle distance [m] where adaptive steering relief fades out to baseline blend",
+    )
+    parser.add_argument(
+        "--render-gif",
+        action="store_true",
+        help="render the dual-line GIF comparison animation",
     )
     parser.add_argument("--name-suffix", type=str, default="", help="output filename suffix")
     return parser.parse_args()
@@ -415,6 +469,13 @@ def main():
     robust_obstacle_speed_weight = float(args.robust_obstacle_speed_weight)
     robust_obstacle_speed_preview = float(args.robust_obstacle_speed_preview)
     robust_obstacle_accel_weight = float(args.robust_obstacle_accel_weight)
+    obstacle_lateral_bias_weight = float(args.obstacle_lateral_bias_weight)
+    obstacle_speed_cap_base = float(args.obstacle_speed_cap_base)
+    obstacle_speed_cap_gain = float(args.obstacle_speed_cap_gain)
+    steering_blend = float(args.steering_blend)
+    adaptive_steering_relief = bool(args.adaptive_steering_relief)
+    steering_relief_lateral_threshold = float(args.steering_relief_lateral_threshold)
+    steering_relief_obstacle_distance = float(args.steering_relief_obstacle_distance)
     controller_formulation = args.controller_formulation
     qp_solver = args.qp_solver
     track_name = args.track_name
@@ -450,7 +511,14 @@ def main():
         f"min_speed_floor={robust_min_speed_floor:.3f}, "
         f"obstacle_speed_weight={robust_obstacle_speed_weight:.3f}, "
         f"obstacle_speed_preview={robust_obstacle_speed_preview:.3f}, "
-        f"obstacle_accel_weight={robust_obstacle_accel_weight:.3f}"
+        f"obstacle_accel_weight={robust_obstacle_accel_weight:.3f}, "
+        f"lateral_bias_weight={obstacle_lateral_bias_weight:.3f}, "
+        f"speed_cap_base={obstacle_speed_cap_base:.3f}, "
+        f"speed_cap_gain={obstacle_speed_cap_gain:.3f}, "
+        f"steering_blend={steering_blend:.3f}, "
+        f"adaptive_steering_relief={adaptive_steering_relief}, "
+        f"relief_lateral_threshold={steering_relief_lateral_threshold:.3f}, "
+        f"relief_obstacle_distance={steering_relief_obstacle_distance:.3f}"
     )
     if obstacle_slack_penalty is not None:
         print(f"obstacle_slack_penalty={float(obstacle_slack_penalty):.3f}")
@@ -487,6 +555,13 @@ def main():
         robust_obstacle_speed_weight=robust_obstacle_speed_weight,
         robust_obstacle_speed_preview=robust_obstacle_speed_preview,
         robust_obstacle_accel_weight=robust_obstacle_accel_weight,
+        obstacle_lateral_bias_weight=obstacle_lateral_bias_weight,
+        obstacle_speed_cap_base=obstacle_speed_cap_base,
+        obstacle_speed_cap_gain=obstacle_speed_cap_gain,
+        steering_blend=steering_blend,
+        adaptive_steering_relief=adaptive_steering_relief,
+        steering_relief_lateral_threshold=steering_relief_lateral_threshold,
+        steering_relief_obstacle_distance=steering_relief_obstacle_distance,
         control_update_interval=control_update_interval,
         controller_formulation=controller_formulation,
         qp_solver=qp_solver,
@@ -521,6 +596,13 @@ def main():
         robust_obstacle_speed_weight=robust_obstacle_speed_weight,
         robust_obstacle_speed_preview=robust_obstacle_speed_preview,
         robust_obstacle_accel_weight=robust_obstacle_accel_weight,
+        obstacle_lateral_bias_weight=obstacle_lateral_bias_weight,
+        obstacle_speed_cap_base=obstacle_speed_cap_base,
+        obstacle_speed_cap_gain=obstacle_speed_cap_gain,
+        steering_blend=steering_blend,
+        adaptive_steering_relief=adaptive_steering_relief,
+        steering_relief_lateral_threshold=steering_relief_lateral_threshold,
+        steering_relief_obstacle_distance=steering_relief_obstacle_distance,
         control_update_interval=control_update_interval,
         controller_formulation=controller_formulation,
         qp_solver=qp_solver,
@@ -560,14 +642,16 @@ def main():
         FIGURES_DIR,
         PAPER_DUAL_PNG_TEMPLATE.format(track=track_name, suffix=suffix),
     )
-    if args.skip_animation:
-        dual_gif_path = None
-        print("\nSkipped paper dual-line animation generation.")
-    else:
+    if args.render_gif:
         print("\n\n" + "#" * 60)
         print("# Generating paper dual-line comparison animation...")
         print("#" * 60)
         generate_dual_line_animation(result_robust, result_nonrobust, track_r, dual_gif_path, fps=20, max_frames=300)
+    else:
+        dual_gif_path = None
+        print("\n\n" + "#" * 60)
+        print("# Skipping paper dual-line animation (PNG-only mode)...")
+        print("#" * 60)
 
     print("\n\n" + "#" * 60)
     print("# Generating paper full-trajectory PNG...")
@@ -603,6 +687,13 @@ def main():
         "robust_obstacle_speed_weight": robust_obstacle_speed_weight,
         "robust_obstacle_speed_preview": robust_obstacle_speed_preview,
         "robust_obstacle_accel_weight": robust_obstacle_accel_weight,
+        "obstacle_lateral_bias_weight": obstacle_lateral_bias_weight,
+        "obstacle_speed_cap_base": obstacle_speed_cap_base,
+        "obstacle_speed_cap_gain": obstacle_speed_cap_gain,
+        "steering_blend": steering_blend,
+        "adaptive_steering_relief": adaptive_steering_relief,
+        "steering_relief_lateral_threshold": steering_relief_lateral_threshold,
+        "steering_relief_obstacle_distance": steering_relief_obstacle_distance,
         "suffix": suffix,
         "robust_tag": robust_tag,
         "nonrobust_tag": nonrobust_tag,

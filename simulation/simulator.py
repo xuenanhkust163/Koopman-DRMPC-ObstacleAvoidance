@@ -50,6 +50,7 @@ class SimResult:
         # ------------------------------------------------------------------
         self.method_name = method_name
         self.track_name = track_name
+        self.distributionally_robust = None
 
         # ------------------------------------------------------------------
         # Time-series data, one element appended per simulation step
@@ -94,22 +95,35 @@ class SimResult:
 class Simulator:
     """Closed-loop simulation orchestrator for track, controller, and noise."""
 
-    def __init__(self, track, controller, disturbance_gen=None):
+    def __init__(self, track, controller, disturbance_gen=None, noise_mode="process"):
         """Store references to the track, controller, and optional noise model."""
+        if noise_mode not in ("measurement", "process"):
+            raise ValueError("noise_mode must be 'measurement' or 'process'")
         self.track = track
         self.controller = controller
         self.disturbance_gen = disturbance_gen
+        self.noise_mode = noise_mode
 
     def run(self, x0=None, max_steps=MAX_SIM_STEPS, lap_fraction=0.95,
             verbose=True, detailed_step_log=False,
             detailed_step_log_max_steps=None,
-            control_update_interval=CONTROL_UPDATE_INTERVAL):
+            control_update_interval=CONTROL_UPDATE_INTERVAL,
+            steering_blend=1.0,
+            adaptive_steering_relief=False,
+            steering_relief_lateral_threshold=6.0,
+            steering_relief_obstacle_distance=10.0):
         """Execute the full closed-loop MPC simulation loop."""
         # ------------------------------------------------------------------
         # Validate inputs and grab local references.
         # ------------------------------------------------------------------
         if control_update_interval <= 0:
             raise ValueError("control_update_interval must be a positive integer")
+        if not (0.0 < float(steering_blend) <= 1.0):
+            raise ValueError("steering_blend must be in (0, 1]")
+        if float(steering_relief_lateral_threshold) <= 0.0:
+            raise ValueError("steering_relief_lateral_threshold must be > 0")
+        if float(steering_relief_obstacle_distance) <= 0.0:
+            raise ValueError("steering_relief_obstacle_distance must be > 0")
 
         track = self.track
         controller = self.controller
@@ -124,6 +138,7 @@ class Simulator:
             x0 = np.array([cx[0], cy[0], heading[0], ref_init[0, 0], ref_init[0, 1]])
 
         result = SimResult(controller.name, track.__class__.__name__)
+        result.distributionally_robust = getattr(controller, "distributionally_robust", None)
         controller.reset()
 
         # ------------------------------------------------------------------
@@ -185,7 +200,21 @@ class Simulator:
             from config import T_HORIZON
             # Use the current arc length directly to avoid lagging the first reference point.
             ref = track.get_reference_trajectory(
-                idx, T_HORIZON, start_s=current_s)
+                idx,
+                T_HORIZON,
+                current_speed=float(x[IDX_V]),
+                start_s=current_s,
+            )
+
+            measurement_noise = np.zeros(5)
+            if self.noise_mode == "measurement" and self.disturbance_gen is not None:
+                w_meas = self.disturbance_gen.sample_single()
+                measurement_noise[0] = w_meas[0] * 0.5
+                measurement_noise[1] = w_meas[1] * 0.5
+                measurement_noise[IDX_PSI] = w_meas[3] * 0.05
+                measurement_noise[IDX_V] = w_meas[2] * 0.2
+                measurement_noise[IDX_OMEGA] = w_meas[4] * 0.05
+            x_observed = x + measurement_noise
 
             # ------------------------------------------------------------------
             # Step D: solve MPC or reuse the held control.
@@ -195,10 +224,10 @@ class Simulator:
                 try:
                     # Prefer passing u_prev so controllers can model rate penalties consistently.
                     try:
-                        u_opt, info = controller.solve(x, ref, obstacles, u_prev=held_u)
+                        u_opt, info = controller.solve(x_observed, ref, obstacles, u_prev=held_u)
                     except TypeError:
                         # Fall back to the legacy interface when u_prev is unsupported.
-                        u_opt, info = controller.solve(x, ref, obstacles)
+                        u_opt, info = controller.solve(x_observed, ref, obstacles)
                 except Exception as e:
                     if verbose:
                         print(f"  Step {step}: controller error: {e}")
@@ -213,8 +242,28 @@ class Simulator:
                 info['status'] = f"hold({held_info.get('status', 'unknown')})"
 
             # ------------------------------------------------------------------
-            # Step E: clip control inputs to actuator limits.
+            # Step E: smooth and clip control inputs.
             # ------------------------------------------------------------------
+            if should_solve and steering_blend < 1.0:
+                effective_blend = float(steering_blend)
+                if adaptive_steering_relief:
+                    # Increase steering responsiveness when approaching a risky
+                    # state (large lateral deviation or close obstacle).
+                    relief_ratio = min(1.0, abs(float(lat_err)) / float(steering_relief_lateral_threshold))
+                    if obstacles:
+                        d_center_min = min(np.hypot(x[0] - ox, x[1] - oy) - radius for ox, oy, radius in obstacles)
+                        obstacle_ratio = max(
+                            0.0,
+                            min(1.0, 1.0 - (float(d_center_min) / float(steering_relief_obstacle_distance)))
+                        )
+                        relief_ratio = max(relief_ratio, obstacle_ratio)
+
+                    effective_blend = effective_blend + (1.0 - effective_blend) * relief_ratio
+
+                # Blend only steering so the path is less jagged without adding
+                # a full-step hold delay to the longitudinal channel.
+                u_opt[1] = float(effective_blend) * float(u_opt[1]) + (1.0 - float(effective_blend)) * float(held_u[1])
+
             u_opt[0] = np.clip(u_opt[0], A_MIN, A_MAX)
             u_opt[1] = np.clip(u_opt[1], -DELTA_MAX, DELTA_MAX)
 
@@ -227,7 +276,7 @@ class Simulator:
             # Step F: sample environment disturbance noise.
             # ------------------------------------------------------------------
             noise = np.zeros(5)
-            if self.disturbance_gen is not None:
+            if self.noise_mode == "process" and self.disturbance_gen is not None:
                 w = self.disturbance_gen.sample_single()
                 noise[0] = w[0] * 0.1
                 noise[1] = w[1] * 0.1
@@ -238,7 +287,9 @@ class Simulator:
             # ------------------------------------------------------------------
             # Step G: propagate dynamics to the next state.
             # ------------------------------------------------------------------
-            x_next = discrete_step(x, u_opt) + noise
+            x_next = discrete_step(x, u_opt)
+            if self.noise_mode == "process":
+                x_next = x_next + noise
             x_next[IDX_V] = np.clip(x_next[IDX_V], V_MIN, V_MAX)
 
             # ------------------------------------------------------------------
@@ -264,7 +315,8 @@ class Simulator:
                 x_str = np.array2string(result.states[-2], precision=4, suppress_small=True)
                 ref_str = np.array2string(ref[0], precision=4, suppress_small=True)
                 u_str = np.array2string(u_opt, precision=4, suppress_small=True)
-                noise_str = np.array2string(noise, precision=4, suppress_small=True)
+                logged_noise = measurement_noise if self.noise_mode == "measurement" else noise
+                noise_str = np.array2string(logged_noise, precision=4, suppress_small=True)
                 x_next_str = np.array2string(x_next, precision=4, suppress_small=True)
                 # Print one step summary line.
                 print(
@@ -303,7 +355,8 @@ class Simulator:
                     key_parts.append(f"obs_slack_max={debug.get('obs_slack_max', 0.0):.3f}")
                     print(f"  diag   = {'; '.join(key_parts)}")
                     print(f"  active = {active}")
-                print(f"  noise  = {noise_str}")
+                noise_label = "meas_n" if self.noise_mode == "measurement" else "noise"
+                print(f"  {noise_label:<6} = {noise_str}")
                 print(f"  x_next = {x_next_str}")
                 print(
                     f"  speed  = v:{result.states[-2][IDX_V]:.4f} -> {x_next[IDX_V]:.4f} m/s, "

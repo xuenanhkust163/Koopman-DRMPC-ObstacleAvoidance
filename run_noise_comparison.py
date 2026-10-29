@@ -323,10 +323,10 @@ def generate_dual_line_animation(
     ax.set_title(f'Robust vs Non-Robust Comparison on {TRACK_NAME}', fontsize=13, pad=12)
     
     # Initialize trajectory artists.
-    glow_r, = ax.plot([], [], color='C0', linewidth=3.6, alpha=0.15, zorder=4)
-    glow_nr, = ax.plot([], [], color='C3', linewidth=3.6, alpha=0.14, zorder=4)
-    line_r, = ax.plot([], [], color='C0', linewidth=1.45, alpha=0.95, label='Robust K-DRMPC', zorder=5)
-    line_nr, = ax.plot([], [], color='C3', linewidth=1.45, alpha=0.95, label='Non-Robust K-DRMPC', zorder=5)
+    glow_r, = ax.plot([], [], color='C0', linewidth=2.6, alpha=0.15, zorder=4)
+    glow_nr, = ax.plot([], [], color='C3', linewidth=2.6, alpha=0.14, zorder=4)
+    line_r, = ax.plot([], [], color='C0', linewidth=0.85, alpha=0.95, label='Robust K-DRMPC', zorder=5)
+    line_nr, = ax.plot([], [], color='C3', linewidth=0.85, alpha=0.95, label='Non-Robust K-DRMPC', zorder=5)
     point_r, = ax.plot([], [], 'o', color='C0', markersize=5.2, markeredgecolor='white', markeredgewidth=0.35, zorder=6)
     point_nr, = ax.plot([], [], 'o', color='C3', markersize=5.2, markeredgecolor='white', markeredgewidth=0.35, zorder=6)
     
@@ -473,6 +473,11 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="disturbance RNG seed")
     parser.add_argument("--steps", type=int, default=DEFAULT_STEPS, help="max simulation steps (default 3000)")
     parser.add_argument("--name-suffix", type=str, default="", help="output filename suffix, for example _S0p8_T0p08")
+    parser.add_argument(
+        "--render-gif",
+        action="store_true",
+        help="render the dual-line GIF comparison animation",
+    )
     return parser.parse_args()
 
 
@@ -554,13 +559,19 @@ def main():
     print("=" * 60)
 
     # ---- Generate the dual-line comparison animation ----
-    print("\n\n" + "#" * 60)
-    print("# Generating dual-line comparison animation...")
-    print("#" * 60)
-    dual_gif_path = os.path.join(
-        FIGURES_DIR, f"Comparison_{TRACK_NAME}_dual_line{suffix}.gif"
-    )
-    generate_dual_line_animation(result_robust, result_nonrobust, track_r, dual_gif_path, fps=20, max_frames=300)
+    dual_gif_path = None
+    if args.render_gif:
+        print("\n\n" + "#" * 60)
+        print("# Generating dual-line comparison animation...")
+        print("#" * 60)
+        dual_gif_path = os.path.join(
+            FIGURES_DIR, f"Comparison_{TRACK_NAME}_dual_line{suffix}.gif"
+        )
+        generate_dual_line_animation(result_robust, result_nonrobust, track_r, dual_gif_path, fps=20, max_frames=300)
+    else:
+        print("\n\n" + "#" * 60)
+        print("# Skipping dual-line comparison animation (PNG-only mode)...")
+        print("#" * 60)
 
     # Save the comparison summary.
     summary = {

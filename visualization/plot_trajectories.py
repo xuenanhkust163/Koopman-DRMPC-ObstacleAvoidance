@@ -58,6 +58,13 @@ def _add_crashed_banner(fig, ax, result, color='red'):
     )
 
 
+def _trajectory_color(method_name, result):
+    robust_state = getattr(result, 'distributionally_robust', None)
+    if isinstance(robust_state, (bool, np.bool_)):
+        return '#1769aa' if robust_state else '#d62728'
+    return METHOD_COLORS.get(method_name, 'black')
+
+
 def plot_trajectory_comparison(results, track, title="Trajectory Comparison",
                                filename=None, save_dir=FIGURES_DIR):
     """
@@ -119,7 +126,7 @@ def plot_trajectory_comparison(results, track, title="Trajectory Comparison",
     for method_name, result in results.items():
         data = result.to_arrays()
         states = data['states']
-        color = METHOD_COLORS.get(method_name, 'black')
+        color = _trajectory_color(method_name, result)
         label = METHOD_LABELS.get(method_name, method_name)
         ax.plot(states[:, 0], states[:, 1], color=color, linewidth=1.5,
                 label=label, alpha=0.8)

@@ -29,6 +29,7 @@ from config import (
     N_Z,  # Koopman空间维度，默认8
     T_HORIZON,  # 预测时域长度，默认20步
     DT,  # 时间步长，默认0.1秒
+    L_WHEELBASE,
     Q_WEIGHTS,  # 状态跟踪权重向量
     R_WEIGHTS,  # 控制输入权重向量
     V_MIN,  # 最小速度 [米/秒]
@@ -126,6 +127,7 @@ class KMPCController:
         """
         # 控制器名称，用于日志和结果标识
         self.name = "K-MPC"
+        self.use_physical_state_dynamics = False
 
         # 初始化上一次控制输入为零向量
         # 用于计算控制增量和平滑性约束
@@ -320,6 +322,20 @@ class KMPCController:
             # ca.mtimes表示矩阵乘法
             z_next = ca.mtimes(self._A_ca, Z[-1]) + \
                      ca.mtimes(self._B_ca, U[:, t])
+            if self.use_physical_state_dynamics:
+                v_next = Z[-1][IDX_V] + DT * U[0, t]
+                omega_next = v_next * ca.tan(U[1, t]) / L_WHEELBASE
+                psi_next = Z[-1][IDX_PSI] + DT * omega_next
+                px_next = Z[-1][0] + DT * v_next * ca.cos(psi_next) / self.norm_params['px_std']
+                py_next = Z[-1][1] + DT * v_next * ca.sin(psi_next) / self.norm_params['py_std']
+                z_next = ca.vertcat(
+                    px_next,
+                    py_next,
+                    psi_next,
+                    v_next,
+                    omega_next,
+                    z_next[N_X:],
+                )
             # 添加到状态轨迹列表
             Z.append(z_next)
 

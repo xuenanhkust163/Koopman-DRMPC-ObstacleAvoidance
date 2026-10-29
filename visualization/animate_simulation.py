@@ -22,7 +22,7 @@ from tracks.custom_track import CustomWindingTrack
 from tracks.lusail_short_track import LusailShortTrack
 from tracks.lusail_track import LusailTrack
 from tracks.sprint_oval_track import SprintOvalTrack
-from tracks.serpentine_track import SerpentineTrack, SerpentineTrackHorizontal
+from tracks.serpentine_track import SerpentineTrack
 from tracks.monaco_hairpin_track import MonacoHairpinTrack
 from tracks.suzuka_flow_track import SuzukaFlowTrack
 from tracks.spa_flow_track import SpaFlowTrack
@@ -65,8 +65,6 @@ def _build_track(track_name: str):
         return SprintOvalTrack()
     if track_name == "SerpentineTrack":
         return SerpentineTrack()
-    if track_name == "SerpentineTrackHorizontal":
-        return SerpentineTrackHorizontal()
     if track_name == "MonacoHairpinTrack":
         return MonacoHairpinTrack()
     if track_name == "SuzukaFlowTrack":
@@ -122,6 +120,7 @@ def _load_from_result(path: Path) -> Dict[str, np.ndarray]:
     return {
         "method": result.method_name,
         "track": result.track_name,
+        "distributionally_robust": getattr(result, "distributionally_robust", None),
         "states": states,
         "time": timestamps,
         "ref_v": ref_v,
@@ -252,9 +251,13 @@ def _build_animation(
     method_name = run.get("method", "") if isinstance(run, dict) else ""
     ml = method_name.lower() if method_name else ""
     # Detect robust either from method name or from filename/path
-    is_robust = any(tok in ml for tok in ("k-dr", "kdr", "drmpc", "dr-mpc", "robust")) or any(
-        tok in source_l for tok in ("_robust", "robust", "k-dr", "kdr", "drmpc")
-    )
+    robust_state = run.get("distributionally_robust") if isinstance(run, dict) else None
+    if isinstance(robust_state, (bool, np.bool_)):
+        is_robust = bool(robust_state)
+    else:
+        is_robust = any(tok in ml for tok in ("k-dr", "kdr", "drmpc", "dr-mpc", "robust")) or any(
+            tok in source_l for tok in ("_robust", "robust", "k-dr", "kdr", "drmpc")
+        )
     traj_color = "#1f77b4" if is_robust else "#d62728"
 
     fig = plt.figure(figsize=(17, 9))

@@ -111,8 +111,8 @@ def run_one(args, sigma, seed):
         "--track-name", args.track_name,
         "--name-suffix", suffix,
     ]
-    if args.skip_animation:
-        cmd.append("--skip-animation")
+    if not args.skip_animation:
+        cmd.append("--render-gif")
 
     print("\n" + "=" * 72)
     print(f"Running QP noise sweep point: sigma={sigma:g}, seed={seed}")

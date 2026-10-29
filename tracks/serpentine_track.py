@@ -8,10 +8,7 @@ to stress-test lateral tracking performance:
   - A compact layout with high average curvature
   - Several direction reversals
 
-11 rectangular obstacles placed at braking / apex zones.
-(12 candidates generated on an equi-arc-length grid; the one at s≈553m is
-skipped because it coincides with a U-turn of radius 27.7m, comparable to
-the track half-width, making the local geometry mechanically infeasible.)
+13 rectangular obstacles placed at braking / apex zones on an equi-arc-length grid.
 """
 
 import numpy as np
@@ -27,12 +24,11 @@ from config import OBSTACLE_RADIUS, TRACK_HALF_WIDTH, OBSTACLE_LAYOUT_MODE, OBST
 class SerpentineTrack(BaseTrack):
     """Highly winding serpentine circuit (~1.4 km) with dense switchbacks."""
 
-    def __init__(self, num_points=1400, target_length=1400.0, swap_xy=False):
+    def __init__(self, num_points=1400, target_length=1400.0):
         super().__init__()
         self._target_points = num_points
         self._target_length = target_length
-        self._swap_xy = bool(swap_xy)
-        self._display_name = "Serpentine Horizontal Track" if self._swap_xy else "Serpentine Track"
+        self._display_name = "Serpentine Track"
         self._build_track()
 
     def _build_track(self):
@@ -89,8 +85,7 @@ class SerpentineTrack(BaseTrack):
             [   0,    0],
         ], dtype=np.float64)
 
-        if self._swap_xy:
-            waypoints = waypoints[:, [1, 0]]
+        waypoints = waypoints[:, [1, 0]]
 
         # --- Scale to target length ---
         raw_length = sum(
@@ -125,28 +120,28 @@ class SerpentineTrack(BaseTrack):
     # Obstacle placement
     # ------------------------------------------------------------------
 
-    def _place_obstacles(self):
-        """Place 11 rectangular obstacles distributed around the circuit.
-
-        Note: 12 candidates are generated on an equi-arc-length grid, but the
-        candidate at rect_idx=4 (s≈553m) is dropped because it is placed in a
-        U-turn with local radius ≈27.7m, which is comparable to the track
-        half-width (12m) and therefore mechanically infeasible for any realistic
-        racing trajectory. Dropping it at the final append stage (rather than
-        skipping the loop body) preserves the RNG state so the remaining 11
-        obstacles' positions and sizes are identical to the previous layout.
-        """
+    def _place_obstacles(self, start_clearance_m=0.0):
+        """Place 13 rectangular obstacles, optionally clearing the start/finish zone."""
         N = self._num_points
         curvature = self._curvature
 
-        # Keep the start/finish area clear
-        start_exclusion = max(80, N // 12)
-        num_rectangles = 12
-        corner_indices = np.linspace(
-            start_exclusion,
-            N - start_exclusion - 1,
-            num_rectangles,
-            dtype=int,
+        num_rectangles = 13
+        start_clearance_m = float(start_clearance_m)
+        if start_clearance_m < 0.0 or 2.0 * start_clearance_m >= self._total_length:
+            raise ValueError("start_clearance_m must be non-negative and less than half the track length")
+        if start_clearance_m == 0.0:
+            start_offset = 62.0
+            arc_spacing = self._total_length / num_rectangles
+            obstacle_s = start_offset + np.arange(num_rectangles) * arc_spacing
+        else:
+            obstacle_s = np.linspace(
+                start_clearance_m,
+                self._total_length - start_clearance_m,
+                num_rectangles,
+            )
+        corner_indices = np.mod(
+            np.rint(np.interp(obstacle_s, self._arc_length, np.arange(N))).astype(int),
+            N,
         )
 
         self._obstacles = []
@@ -213,10 +208,8 @@ class SerpentineTrack(BaseTrack):
 
             cx, cy, rect_length, rect_width, angle, _ = best_candidate
 
-            # Skip geometrically infeasible obstacle at s≈553m (U-turn, R=27.7m).
-            # Placed AFTER best_candidate selection to keep the RNG state
-            # identical, so the other 11 obstacles remain unchanged.
-            if rect_idx == 4:
+            # Keep blocks out of the one U-turn tighter than the vehicle can negotiate.
+            if abs(curvature[idx]) > 1.0 / 30.0:
                 continue
 
             placed_centers.append((cx, cy))
@@ -224,10 +217,3 @@ class SerpentineTrack(BaseTrack):
             # Approximate circular footprint for collision checks
             r_approx = 0.5 * max(rect_length, rect_width)
             self._obstacles.append((cx, cy, r_approx))
-
-
-class SerpentineTrackHorizontal(SerpentineTrack):
-    """Horizontal version of SerpentineTrack with raw waypoint x/y coordinates swapped."""
-
-    def __init__(self, num_points=1400, target_length=1400.0):
-        super().__init__(num_points=num_points, target_length=target_length, swap_xy=True)

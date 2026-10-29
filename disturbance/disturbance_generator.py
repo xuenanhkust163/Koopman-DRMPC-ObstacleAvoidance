@@ -57,7 +57,7 @@ class DisturbanceGenerator:
     - 可实现性：使用固定种子保证结果可复现
     """
 
-    def __init__(self, sigma=None, n_components=3, seed=42):
+    def __init__(self, sigma=None, n_components=3, seed=42, enabled=None):
         """
         初始化干扰生成器，设置高斯混合分布的参数。
 
@@ -80,6 +80,7 @@ class DisturbanceGenerator:
         self.sigma = sigma if sigma is not None else NOMINAL_SIGMA  # 默认回落到 config.NOMINAL_SIGMA
         sigma = self.sigma  # 后续公式统一使用本地 sigma
         self.n_components = n_components  # 保存高斯混合分量数量
+        self.enabled = ENABLE_DISTURBANCE if enabled is None else bool(enabled)
 
         # 创建随机数生成器实例
         # 使用RandomState而不是全局numpy.random，确保随机数序列独立可控
@@ -133,7 +134,7 @@ class DisturbanceGenerator:
                       每一行是一个5维干扰向量
                       例如：w_samples[0] = [w_px, w_py, w_v, w_psi, w_omega]
         """
-        if not ENABLE_DISTURBANCE:
+        if not self.enabled:
             return np.zeros((n_samples, N_W))
 
         # 初始化样本数组，全部为零
@@ -173,7 +174,7 @@ class DisturbanceGenerator:
             w: numpy数组，形状为(N_W,) = (5,)
                单个5维干扰向量 [w_px, w_py, w_v, w_psi, w_omega]
         """
-        if not ENABLE_DISTURBANCE:
+        if not self.enabled:
             return np.zeros(N_W)
 
         # 步骤1：根据权重随机选择一个高斯分量
@@ -211,7 +212,7 @@ class DisturbanceGenerator:
                         固定的经验样本集，用于分布鲁棒优化
                         例如：(100, 5)表示100个5维干扰样本
         """
-        if not ENABLE_DISTURBANCE:
+        if not self.enabled:
             return np.zeros((n_samples, N_W))
 
         # 使用独立的随机数生成器以保证可实现性
