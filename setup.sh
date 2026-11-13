@@ -1,15 +1,18 @@
 #!/bin/bash
-# Experiment项目快速设置脚本
-# 用法: ./setup.sh
+# Experiment project quick setup script
+# Usage: ./setup.sh
 
-set -e  # 遇到错误时退出
+set -e  # Exit on error
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$PROJECT_ROOT"
 
 echo "=================================================="
 echo " K-DRMPC Experiment 项目设置"
 echo "=================================================="
 echo ""
 
-# 检查Python
+# Check Python
 if ! command -v python3 &> /dev/null; then
     echo "❌ 错误: 未找到Python3"
     echo "请先安装Python 3.10或更高版本"
@@ -19,23 +22,23 @@ fi
 PYTHON_VERSION=$(python3 --version | cut -d' ' -f2)
 echo "✓ 找到Python: $PYTHON_VERSION"
 
-# 检查是否在正确的目录
-if [ ! -f "config.py" ]; then
-    echo "❌ 错误: 请在Experiment目录下运行此脚本"
+# Check if in the correct directory
+if [ ! -f "src/config.py" ]; then
+    echo "❌ 错误: 未找到项目文件 src/config.py"
     exit 1
 fi
 
-echo "✓ 当前目录: $(pwd)"
+echo "✓ 项目目录: $PROJECT_ROOT"
 echo ""
 
-# 选择环境类型
+# Select environment type
 echo "请选择虚拟环境类型:"
 echo "1) conda (推荐)"
 echo "2) venv"
 read -p "输入选项 (1/2): " choice
 
 if [ "$choice" = "1" ]; then
-    # 使用conda
+    # Using conda
     if ! command -v conda &> /dev/null; then
         echo "❌ 错误: 未找到conda"
         echo "请先安装Anaconda或Miniconda"
@@ -57,7 +60,7 @@ if [ "$choice" = "1" ]; then
     ENV_NAME="koopman_exp (conda)"
     
 elif [ "$choice" = "2" ]; then
-    # 使用venv
+    # Using venv
     echo ""
     echo "创建venv虚拟环境..."
     python3 -m venv venv
@@ -82,7 +85,7 @@ echo "=================================================="
 echo " 验证安装"
 echo "=================================================="
 
-# 验证核心库
+# Verify core libraries
 python3 -c "
 import torch
 import numpy

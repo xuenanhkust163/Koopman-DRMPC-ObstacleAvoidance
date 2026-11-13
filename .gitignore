@@ -11,3 +11,10 @@ _output/
 *.log
 
 docs/paper_alignment_steps.md
+
+docs/paper_copy/manuscript_20260929.aux
+docs/paper_copy/manuscript_20260929.fdb_latexmk
+docs/paper_copy/manuscript_20260929.fls
+docs/paper_copy/manuscript_20260929.out
+docs/paper_copy/manuscript_20260929.pdf
+docs/paper_copy/manuscript_20260929.synctex.gz

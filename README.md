@@ -16,7 +16,7 @@ The codebase supports the study reported in the manuscript *Distributionally Rob
 - **Distributionally robust MPC** based on Wasserstein ambiguity sets and CVaR constraints to explicitly handle measurement noise and model uncertainty.
 - **Unified controller benchmarking** across LMPC, NMPC, K-MPC, and K-DRMPC.
 - **Robust vs non-robust evaluation** through `run_noise_comparison.py`, using the same track and disturbance realizations to produce comparative metrics and dual-trajectory GIF visualizations.
-- **Multiple track configurations** including SprintOval, LusailShort, Lusail, SerpentineTrack, MonacoHairpin, SpaFlow, and SuzukaFlow.
+- **Two track configurations**: BahrainInternationalCircuit and SerpentineTrack.
 - **Complete simulation pipeline** covering spline-based track modeling, rectangular obstacle generation, Gaussian disturbance injection, and performance evaluation.
 
 ## Installation
@@ -34,19 +34,19 @@ If you prefer a manual setup workflow, install the required packages listed in `
 ### 1. Generate training data
 
 ```bash
-python generate_training_data.py
+python script/generate_training_data.py
 ```
 
 ### 2. Train the Koopman model
 
 ```bash
-python run_training.py
+python script/run_training.py
 ```
 
 ### 3. Run the robust vs non-robust comparison
 
 ```bash
-bash run_all_seeds.sh
+bash script/run_all_seeds.sh
 ```
 
 This script runs comparison experiments on SerpentineTrack under three random seeds and multiple disturbance levels.
@@ -61,19 +61,14 @@ Expected outputs:
 ### 4. Run sensitivity analysis
 
 ```bash
-python run_sensitivity_analysis.py
+python script/run_sensitivity_analysis.py
 ```
 
 ## Repository Structure
 
-- `controllers/`: controller implementations, including LMPC, NMPC, K-MPC, and K-DRMPC.
-- `model/`: Koopman model definitions and training-related components.
-- `simulation/`: simulation logic, closed-loop rollout, and experiment orchestration.
-- `tracks/`: track geometry and benchmark track definitions.
-- `vehicle/`: vehicle dynamics and state propagation models.
-- `disturbance/`: disturbance generation and uncertainty-related components.
-- `visualization/`: plotting, animation, and result rendering utilities.
-- `data/`: data loading and dataset support.
+- `src/`: reusable project code, including controllers, models, simulation, tracks, and visualization.
+- `script/`: training, experiment, analysis, aggregation, and batch-run entrypoints.
+- `data/`: source datasets and assets; data-loading code lives in `src/data/`.
 - `docs/`: supplementary notes and internal documentation.
 - `_output/`: generated models, figures, and experiment results.
 
@@ -81,10 +76,10 @@ python run_sensitivity_analysis.py
 
 For a standard end-to-end workflow, run the steps in the following order:
 
-1. Generate training data with `python generate_training_data.py`.
-2. Train the Koopman model with `python run_training.py`.
-3. Evaluate robust and non-robust controllers with `bash run_all_seeds.sh` or `python run_noise_comparison.py`.
-4. Run parameter sensitivity studies with `python run_sensitivity_analysis.py`.
+1. Generate training data with `python script/generate_training_data.py`.
+2. Train the Koopman model with `python script/run_training.py`.
+3. Evaluate robust and non-robust controllers with `bash script/run_all_seeds.sh` or `python script/run_noise_comparison.py`.
+4. Run parameter sensitivity studies with `python script/run_sensitivity_analysis.py`.
 
 ## Citation
 
